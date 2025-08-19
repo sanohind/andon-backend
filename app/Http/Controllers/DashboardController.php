@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Log;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
@@ -68,12 +69,13 @@ class DashboardController extends Controller
             ->orderBy('timestamp', 'desc')
             ->get()
             ->map(function($problem) {
+                $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, 'UTC');
                 return [
                     'id' => $problem->id,
                     'machine' => $problem->tipe_mesin,
                     'problem_type' => $problem->tipe_problem,
                     'timestamp' => Carbon::parse($problem->timestamp)->format('d/m/Y H:i:s'),
-                    'duration' => Carbon::parse($problem->timestamp)->diffForHumans(),
+                    'duration' => $problemTimestamp->diffForHumans(),
                     'severity' => $this->getProblemSeverity($problem->tipe_problem)
                 ];
             });
@@ -136,14 +138,14 @@ class DashboardController extends Controller
                 'message' => 'Problem tidak ditemukan'
             ], 404);
         }
-
+        $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, 'UTC');
         $detail = [
             'id' => $problem->id,
             'machine' => $problem->tipe_mesin,
             'problem_type' => $problem->tipe_problem,
             'status' => $problem->status,
             'timestamp' => Carbon::parse($problem->timestamp)->format('d/m/Y H:i:s'),
-            'duration' => Carbon::parse($problem->timestamp)->diffForHumans(),
+            'duration' => $problemTimestamp->diffForHumans(),
             'severity' => $this->getProblemSeverity($problem->tipe_problem),
             'recommended_action' => $this->getRecommendedAction($problem->tipe_problem),
             'description' => $this->getProblemDescription($problem->tipe_problem)
@@ -202,17 +204,36 @@ class DashboardController extends Controller
      */
     public function updateProblemStatus(Request $request, $id)
     {
-        $status = $request->input('status', 'OFF');
+        $problem = Log::find($id);
+
+        if (!$problem) {
+            return response()->json(['success' => false, 'message' => 'Problem tidak ditemukan'], 404);
+        }
+
+        $newStatus = $request->input('status', 'OFF');
+
+        // Jika status diubah menjadi OFF, hitung durasi dan catat waktu selesai
+        if ($newStatus === 'OFF' && $problem->status === 'ON') {
+            $problem->status = $newStatus;
+            $problem->resolved_at = Carbon::now();
+
+            // Hitung selisih waktu
+            $duration = $problem->resolved_at->diffInSeconds($problem->timestamp);
+            
+            // Pastikan durasi selalu positif (abs) dan merupakan bilangan bulat (round/int)
+            $problem->duration_in_seconds = (int) round(abs($duration));
+        } else {
+            $problem->status = $newStatus;
+        }
         
-        DB::table('log')
-            ->where('id', $id)
-            ->update(['status' => $status]);
+        $problem->save();
 
         return response()->json([
             'success' => true,
             'message' => 'Status problem berhasil diupdate'
         ]);
     }
+
 
     /**
      * Get statistik dashboard

@@ -19,12 +19,14 @@ class Log extends Model
         'timestamp',
         'tipe_mesin', 
         'tipe_problem',
-        'status'
+        'status',
+        'resolved_at', 
+        'duration_in_seconds'
     ];
     
     // Cast tipe data
     protected $casts = [
-        'timestamp' => 'datetime'
+    'resolved_at' => 'datetime',
     ];
 
     /**
@@ -64,7 +66,7 @@ class Log extends Model
      */
     public function getDurationAttribute()
     {
-        return Carbon::parse($this->timestamp)->diffForHumans();
+    return Carbon::createFromFormat('Y-m-d H:i:s', $this->timestamp, 'UTC')->diffForHumans();
     }
 
     /**
@@ -75,10 +77,7 @@ class Log extends Model
         $severityMap = [
             'Quality' => 'high',
             'Material' => 'medium', 
-            'Safety' => 'critical',
-            'Production' => 'high',
-            'Temperature' => 'medium',
-            'Machine' => 'high'
+            'Machine' => 'critical'
         ];
 
         return $severityMap[$this->tipe_problem] ?? 'medium';
