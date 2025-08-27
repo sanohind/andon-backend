@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Log;
+use App\Models\ProductionData;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
@@ -46,13 +47,19 @@ class DashboardController extends Controller
                 ->orderBy('timestamp', 'desc')
                 ->first();
             
+            // AMBIL DATA KUANTITAS TERBARU
+            $latestProduction = ProductionData::where('machine_name', $machine)
+                ->latest('timestamp') // Mengambil record terbaru
+                ->first();
+
             $statuses[$machine] = [
                 'name' => $machine,
                 'status' => $activeProblem ? 'problem' : 'normal',
                 'color' => $activeProblem ? 'red' : 'green',
                 'problem_type' => $activeProblem ? $activeProblem->tipe_problem : null,
                 'timestamp' => $activeProblem ? $activeProblem->timestamp : null,
-                'last_check' => Carbon::now()->format('Y-m-d H:i:s')
+                'last_check' => Carbon::now()->format('Y-m-d H:i:s'),
+                'quantity' => $latestProduction ? $latestProduction->quantity : 0
             ];
         }
         
