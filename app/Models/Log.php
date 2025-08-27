@@ -26,7 +26,8 @@ class Log extends Model
     
     // Cast tipe data
     protected $casts = [
-    'resolved_at' => 'datetime',
+        'timestamp' => 'datetime',
+        'resolved_at' => 'datetime',
     ];
 
     /**

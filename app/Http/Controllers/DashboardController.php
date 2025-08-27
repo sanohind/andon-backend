@@ -204,34 +204,51 @@ class DashboardController extends Controller
      */
     public function updateProblemStatus(Request $request, $id)
     {
-        $problem = Log::find($id);
+        // Cari masalah yang statusnya masih 'ON' berdasarkan ID
+        $problem = Log::where('id', $id)->where('status', 'ON')->first();
 
+        // Jika tidak ditemukan, kirim pesan error
         if (!$problem) {
-            return response()->json(['success' => false, 'message' => 'Problem tidak ditemukan'], 404);
+            return response()->json([
+                'success' => false, 
+                'message' => 'Problem tidak ditemukan atau sudah diselesaikan sebelumnya.'
+            ], 404);
         }
 
-        $newStatus = $request->input('status', 'OFF');
-
-        // Jika status diubah menjadi OFF, hitung durasi dan catat waktu selesai
-        if ($newStatus === 'OFF' && $problem->status === 'ON') {
-            $problem->status = $newStatus;
-            $problem->resolved_at = Carbon::now();
-
-            // Hitung selisih waktu
-            $duration = $problem->resolved_at->diffInSeconds($problem->timestamp);
+        // Pastikan permintaan ini adalah untuk menyelesaikan masalah
+        if ($request->input('status') === 'OFF') {
             
-            // Pastikan durasi selalu positif (abs) dan merupakan bilangan bulat (round/int)
-            $problem->duration_in_seconds = (int) round(abs($duration));
-        } else {
-            $problem->status = $newStatus;
+            $problem->status = 'OFF';
+            $problem->resolved_at = now(); // Mengambil waktu saat ini (WIB)
+
+            // =====================================================================
+            // == PERHITUNGAN DURASI FINAL YANG AKURAT ==
+            // =====================================================================
+            
+            // 1. Ambil timestamp mentah dari DB untuk menghindari salah interpretasi dari Laravel
+            $timestampString = $problem->getRawOriginal('timestamp');
+
+            // 2. Buat objek waktu dari string mentah, dan paksakan interpretasinya sebagai UTC
+            $startTime = \Carbon\Carbon::createFromFormat('Y-m-d H:i:s', $timestampString, 'UTC');
+            
+            // 3. Hitung selisihnya. Carbon akan menangani konversi antar timezone secara otomatis.
+            $problem->duration_in_seconds = abs($problem->resolved_at->diffInSeconds($startTime));
+            
+            // Simpan semua perubahan ke database
+            $problem->save();
+
+            // Kirim respons sukses
+            return response()->json([
+                'success' => true,
+                'message' => 'Status problem berhasil diupdate'
+            ]);
         }
         
-        $problem->save();
-
+        // Jika ada permintaan status lain (bukan 'OFF'), kirim respons error
         return response()->json([
-            'success' => true,
-            'message' => 'Status problem berhasil diupdate'
-        ]);
+            'success' => false,
+            'message' => 'Permintaan status tidak valid.'
+        ], 400);
     }
 
 
@@ -245,7 +262,7 @@ class DashboardController extends Controller
             'active_problems' => DB::table('log')->where('status', 'ON')->count(),
             'resolved_today' => DB::table('log')
                 ->where('status', 'OFF')
-                ->whereDate('timestamp', Carbon::today())
+                ->whereDate('resolved_at', Carbon::today())
                 ->count(),
             'critical_problems' => DB::table('log')
                 ->where('status', 'ON')

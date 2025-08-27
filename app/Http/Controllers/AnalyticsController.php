@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Http\Controllers\Api;
+namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
@@ -20,23 +20,28 @@ class AnalyticsController extends Controller
             'end_date' => 'required|date_format:Y-m-d',
         ]);
 
-        $startDate = Carbon::parse($request->start_date)->startOfDay();
-        $endDate = Carbon::parse($request->end_date)->endOfDay();
+        $appTimezone = config('app.timezone');
+        $startDate = Carbon::parse($request->start_date, $appTimezone)->startOfDay()->utc();
+        $endDate = Carbon::parse($request->end_date, $appTimezone)->endOfDay()->utc();
 
-        // Ambil semua log yang relevan dalam rentang waktu
-        $logs = Log::whereBetween('timestamp', [$startDate, $endDate])->get();
+        // ===================================================================
+        // LOGIKA QUERY TERPADU YANG BARU
+        // ===================================================================
+        // Ambil semua log yang relevan: yang DIMULAI atau DISELESAIKAN dalam rentang waktu.
+        $allRelevantLogs = Log::where(function ($query) use ($startDate, $endDate) {
+            $query->whereBetween('timestamp', [$startDate, $endDate])
+                  ->orWhereBetween('resolved_at', [$startDate, $endDate]);
+        })->get();
         
-        // Ambil log yang sudah selesai dalam rentang waktu
-        $resolvedLogs = Log::where('status', 'OFF')
-                           ->whereNotNull('resolved_at')
-                           ->whereBetween('resolved_at', [$startDate, $endDate])
-                           ->get();
+        // Dari semua log yang relevan, filter hanya yang sudah selesai.
+        $resolvedLogs = $allRelevantLogs->where('status', 'OFF')->whereNotNull('resolved_at');
+        // ===================================================================
 
-        // Kalkulasi semua metrik
-        $kpis = $this->calculateKPIs($logs, $resolvedLogs);
-        $problemFrequency = $this->calculateProblemFrequency($logs);
+        // Kalkulasi semua metrik dari data yang sudah benar
+        $kpis = $this->calculateKPIs($allRelevantLogs, $resolvedLogs);
+        $problemFrequency = $this->calculateProblemFrequency($allRelevantLogs);
         $downtime = $this->calculateDowntime($resolvedLogs);
-        $problemTypes = $this->calculateProblemTypeDistribution($logs);
+        $problemTypes = $this->calculateProblemTypeDistribution($allRelevantLogs);
         $mttr = $this->calculateMTTR($resolvedLogs);
 
         return response()->json([
@@ -51,24 +56,24 @@ class AnalyticsController extends Controller
         ]);
     }
 
-    private function calculateKPIs($logs, $resolvedLogs)
+    private function calculateKPIs($allLogs, $resolvedLogs)
     {
-        $mostProblematicMachine = $logs->groupBy('tipe_mesin')
-                                       ->sortByDesc(fn($group) => $group->count())
-                                       ->keys()
-                                       ->first();
+        $mostProblematicMachine = $allLogs->groupBy('tipe_mesin')
+                                          ->sortByDesc(fn($group) => $group->count())
+                                          ->keys()
+                                          ->first();
 
         return [
-            'total_problems' => $logs->count(),
+            'total_problems' => $allLogs->count(), // Sekarang menghitung dari sumber yang benar
             'total_downtime_seconds' => $resolvedLogs->sum('duration_in_seconds'),
             'most_problematic_machine' => $mostProblematicMachine ?? 'N/A',
             'average_resolution_time_seconds' => $resolvedLogs->avg('duration_in_seconds'),
         ];
     }
 
-    private function calculateProblemFrequency($logs)
+    private function calculateProblemFrequency($allLogs)
     {
-        $data = $logs->groupBy('tipe_mesin')->map(fn($group) => $group->count());
+        $data = $allLogs->groupBy('tipe_mesin')->map(fn($group) => $group->count());
         return [
             'labels' => $data->keys(),
             'data' => $data->values(),
@@ -84,9 +89,9 @@ class AnalyticsController extends Controller
         ];
     }
 
-    private function calculateProblemTypeDistribution($logs)
+    private function calculateProblemTypeDistribution($allLogs)
     {
-        $data = $logs->groupBy('tipe_problem')->map(fn($group) => $group->count());
+        $data = $allLogs->groupBy('tipe_problem')->map(fn($group) => $group->count());
         return [
             'labels' => $data->keys(),
             'data' => $data->values(),
