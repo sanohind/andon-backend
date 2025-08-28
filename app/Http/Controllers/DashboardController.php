@@ -6,6 +6,7 @@ use App\Models\Log;
 use App\Models\ProductionData;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Carbon\Carbon;
 
 class DashboardController extends Controller
@@ -281,5 +282,37 @@ class DashboardController extends Controller
             'success' => true,
             'data' => $stats
         ]);
+    }
+    public function getPlcStatus()
+    {
+        try {
+            // Ganti dengan alamat IP dan port Node-RED Anda yang sebenarnya
+            $response = Http::timeout(5)->get('http://127.0.0.1:1880/plc-status');
+
+            if ($response->successful()) {
+                return response()->json([
+                    'success' => true,
+                    'data' => $response->json()
+                ]);
+            }
+        } catch (\Exception $e) {
+            // Menangani kasus jika Node-RED tidak bisa dihubungi
+            return response()->json([
+                'success' => false,
+                'data' => [
+                    'status' => 'Unreachable',
+                    'last_error' => 'Could not connect to Node-RED service.',
+                ]
+            ], 500);
+        }
+
+        // Jika response gagal tapi tidak ada exception
+        return response()->json([
+            'success' => false,
+            'data' => [
+                'status' => 'Error',
+                'last_error' => 'Received a non-successful response from Node-RED.',
+            ]
+        ], 502);
     }
 }

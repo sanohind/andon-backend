@@ -18,4 +18,5 @@ Route::prefix('dashboard')->group(function () {
     Route::patch('/problem/{id}/status', [DashboardController::class, 'updateProblemStatus']);
     Route::get('/stats', [DashboardController::class, 'getDashboardStats']);
     Route::get('/analytics', [AnalyticsController::class, 'getAnalyticsData']);
+    Route::get('/plc-status', [DashboardController::class, 'getPlcStatus']);
 });
