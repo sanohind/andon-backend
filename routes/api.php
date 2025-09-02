@@ -3,6 +3,7 @@
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\AnalyticsController;
+use App\Http\Controllers\UserController;
 
 // Auth Routes - TANPA PREFIX AUTH
 Route::post('/login', [AuthController::class, 'login']);
@@ -19,4 +20,9 @@ Route::prefix('dashboard')->group(function () {
     Route::get('/stats', [DashboardController::class, 'getDashboardStats']);
     Route::get('/analytics', [AnalyticsController::class, 'getAnalyticsData']);
     Route::get('/plc-status', [DashboardController::class, 'getPlcStatus']);
+});
+
+Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/users', [UserController::class, 'index']);
+    Route::post('/users', [UserController::class, 'store']);
 });

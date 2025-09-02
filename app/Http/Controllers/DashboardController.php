@@ -15,11 +15,11 @@ class DashboardController extends Controller
      * Daftar mesin yang akan dimonitor
      */
     private $machines = [
-        'Mesin 1',
-        'Mesin 2', 
-        'Mesin 3',
-        'Mesin 4',
-        'Mesin 5'
+        'Meja Inspect 1',
+        'Meja Inspect 2',
+        'Meja Inspect 3',
+        'Meja Inspect 4',
+        'Meja Inspect 5',
     ];
 
     /**
@@ -286,8 +286,9 @@ class DashboardController extends Controller
     public function getPlcStatus()
     {
         try {
-            // Ganti dengan alamat IP dan port Node-RED Anda yang sebenarnya
-            $response = Http::timeout(5)->get('http://127.0.0.1:1880/plc-status');
+            $nodeRedUrl = env('NODE_RED_URL', 'http://127.0.0.1:1880');
+        
+            $response = Http::timeout(5)->get($nodeRedUrl . '/plc-status');
 
             if ($response->successful()) {
                 return response()->json([
