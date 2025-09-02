@@ -101,58 +101,48 @@ class AuthController extends Controller
      */
     public function validateToken(Request $request)
     {
-        $request->validate([
-            'token' => 'required|string'
-        ]);
+        $request->validate(['token' => 'required|string']);
 
         try {
-            // Cari session berdasarkan token
+            // LANGKAH 1: Validasi token dan HANYA ambil user_id
             $session = DB::table('user_sessions')
-                ->join('users', 'user_sessions.user_id', '=', 'users.id')
-                ->where('user_sessions.token', $request->token)
-                ->where('users.active', 1)
-                ->where('user_sessions.expires_at', '>', Carbon::now())
-                ->select(
-                    'users.id',
-                    'users.username', 
-                    'users.name',
-                    'users.role',
-                    'user_sessions.expires_at'
-                )
+                ->where('token', $request->token)
+                ->where('expires_at', '>', Carbon::now())
+                ->select('user_id') // Hanya ambil user_id, lebih efisien
                 ->first();
 
+            // Jika token tidak valid atau sudah expired, hentikan di sini
             if (!$session) {
-                return response()->json([
-                    'valid' => false,
-                    'message' => 'Token tidak valid atau sudah expired'
-                ], 401);
+                return response()->json(['valid' => false, 'message' => 'Token tidak valid atau expired'], 401);
             }
 
-            // Update last activity
+            // LANGKAH 2: Ambil model User yang LENGKAP dari database menggunakan ID
+            // Ini adalah cara yang paling andal untuk mendapatkan semua data user
+            $user = \App\Models\User::find($session->user_id);
+
+            // Jika user tidak ditemukan atau tidak aktif
+            if (!$user || !$user->active) { // Saya berasumsi Anda punya kolom 'active'
+                return response()->json(['valid' => false, 'message' => 'User tidak aktif'], 401);
+            }
+            
+            // LANGKAH 3: Update sesi (logika Anda yang sudah ada)
             DB::table('user_sessions')
                 ->where('token', $request->token)
                 ->update([
                     'updated_at' => Carbon::now(),
-                    'expires_at' => Carbon::now()->addHours(24) // Extend session
+                    'expires_at' => Carbon::now()->addHours(24)
                 ]);
 
+            // LANGKAH 4: Kirim kembali data user yang lengkap.
+            // Metode ->only() akan secara aman mengambil semua data yang kita butuhkan.
             return response()->json([
                 'valid' => true,
-                'user' => [
-                    'id' => $session->id,
-                    'username' => $session->username,
-                    'name' => $session->name,
-                    'role' => $session->role
-                ]
+                'user' => $user->only(['id', 'name', 'username', 'role', 'line_number'])
             ]);
 
         } catch (\Exception $e) {
             \Log::error('Token validation error: ' . $e->getMessage());
-            
-            return response()->json([
-                'valid' => false,
-                'message' => 'Server error'
-            ], 500);
+            return response()->json(['valid' => false, 'message' => 'Server error'], 500);
         }
     }
 
