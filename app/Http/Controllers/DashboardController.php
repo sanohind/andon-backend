@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Log;
 use App\Models\ProductionData;
+use App\Models\InspectionTable;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -11,26 +12,22 @@ use Carbon\Carbon;
 
 class DashboardController extends Controller
 {
-    /**
-     * Daftar mesin yang akan dimonitor
-     */
-    private $machines = [
-        'Meja Inspect 1',
-        'Meja Inspect 2',
-        'Meja Inspect 3',
-        'Meja Inspect 4',
-        'Meja Inspect 5',
-    ];
-
+    private function getAllMachineNames()
+    {
+        // Mengambil semua record dari tabel inspection_tables, 
+        // diurutkan berdasarkan nama, dan hanya mengambil kolom 'name'.
+        return InspectionTable::orderBy('name', 'asc')->pluck('name');
+    }
     /**
      * Tampilkan dashboard monitoring
      */
     public function index()
     {
+        $machines = $this->getAllMachineNames();
         $machineStatuses = $this->getMachineStatuses();
         $activeProblems = $this->getActiveProblems();
         
-        return view('dashboard.monitoring', compact('machineStatuses', 'activeProblems'));
+        return view('dashboard.monitoring', compact('machines', 'machineStatuses', 'activeProblems'));
     }
 
     /**
@@ -39,8 +36,9 @@ class DashboardController extends Controller
     public function getMachineStatuses()
     {
         $statuses = [];
+        $allMachines = $this->getAllMachineNames();
         
-        foreach ($this->machines as $machine) {
+        foreach ($allMachines as $machine) {
             // Cek apakah ada problem aktif untuk mesin ini
             $activeProblem = DB::table('log')
                 ->where('tipe_mesin', $machine)
@@ -266,7 +264,7 @@ class DashboardController extends Controller
     public function getDashboardStats()
     {
         $stats = [
-            'total_machines' => count($this->machines),
+            'total_machines' => InspectionTable::count(), 
             'active_problems' => DB::table('log')->where('status', 'ON')->count(),
             'resolved_today' => DB::table('log')
                 ->where('status', 'OFF')

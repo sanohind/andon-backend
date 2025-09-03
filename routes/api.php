@@ -4,6 +4,7 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\UserController;
+use App\Http\Controllers\InspectionTableController;
 
 // Auth Routes - TANPA PREFIX AUTH
 Route::post('/login', [AuthController::class, 'login']);
@@ -25,4 +26,6 @@ Route::prefix('dashboard')->group(function () {
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/users', [UserController::class, 'index']);
     Route::post('/users', [UserController::class, 'store']);
+    Route::apiResource('/inspection-tables', InspectionTableController::class);
+    Route::get('/machine-status/{name}', [InspectionTableController::class, 'getMachineStatus']);
 });
