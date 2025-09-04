@@ -15,7 +15,6 @@ Route::delete('/cleanup-sessions', [AuthController::class, 'cleanupExpiredSessio
 
 // Dashboard Routes
 Route::prefix('dashboard')->group(function () {
-    Route::get('/status', [DashboardController::class, 'getStatusApi']);
     Route::get('/problem/{id}', [DashboardController::class, 'getProblemDetail']);
     Route::patch('/problem/{id}/status', [DashboardController::class, 'updateProblemStatus']);
     Route::get('/stats', [DashboardController::class, 'getDashboardStats']);
@@ -28,4 +27,5 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/users', [UserController::class, 'store']);
     Route::apiResource('/inspection-tables', InspectionTableController::class);
     Route::get('/machine-status/{name}', [InspectionTableController::class, 'getMachineStatus']);
+    Route::get('dashboard/status', [DashboardController::class, 'getStatusApi']);
 });

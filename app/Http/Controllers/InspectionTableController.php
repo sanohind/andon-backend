@@ -14,13 +14,40 @@ class InspectionTableController extends Controller
 
     public function store(Request $request)
     {
-        $validated = $request->validate(['name' => 'required|string|max:255|unique:inspection_tables']);
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'line_number' => 'required|integer|min:1'
+        ]);
+
+        // Validasi unik secara manual
+        $exists = InspectionTable::where('name', $validated['name'])
+                                ->where('line_number', $validated['line_number'])
+                                ->exists();
+
+        if ($exists) {
+            return response()->json(['message' => 'Nama meja untuk line tersebut sudah ada.'], 422);
+        }
+
         return InspectionTable::create($validated);
     }
 
     public function update(Request $request, InspectionTable $inspectionTable)
     {
-        $validated = $request->validate(['name' => 'required|string|max:255|unique:inspection_tables,name,' . $inspectionTable->id]);
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'line_number' => 'required|integer|min:1'
+        ]);
+
+        // Validasi unik secara manual
+        $exists = InspectionTable::where('name', $validated['name'])
+                                ->where('line_number', $validated['line_number'])
+                                ->where('id', '!=', $inspectionTable->id)
+                                ->exists();
+
+        if ($exists) {
+            return response()->json(['message' => 'Nama meja untuk line tersebut sudah ada.'], 422);
+        }
+
         $inspectionTable->update($validated);
         return $inspectionTable;
     }

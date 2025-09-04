@@ -33,38 +33,57 @@ class DashboardController extends Controller
     /**
      * Get status semua mesin (untuk display lampu indikator)
      */
-    public function getMachineStatuses()
+    public function getMachineStatuses(Request $request)
     {
-        $statuses = [];
-        $allMachines = $this->getAllMachineNames();
+        // Ambil SEMUA meja, karena filter akan dilakukan di frontend Node.js/EJS
+        $allInspectionTables = InspectionTable::orderBy('line_number')->orderBy('name')->get();
         
-        foreach ($allMachines as $machine) {
-            // Cek apakah ada problem aktif untuk mesin ini
-            $activeProblem = DB::table('log')
-                ->where('tipe_mesin', $machine)
-                ->where('status', 'ON')
-                ->orderBy('timestamp', 'desc')
-                ->first();
-            
-            // AMBIL DATA KUANTITAS TERBARU
-            $latestProduction = ProductionData::where('machine_name', $machine)
-                ->latest('timestamp') // Mengambil record terbaru
-                ->first();
+        // Siapkan struktur data yang dikelompokkan per line
+        $groupedStatuses = [];
 
-            $statuses[$machine] = [
-                'name' => $machine,
+        // Ambil semua data log problem dan production dalam satu query yang efisien
+        // Ini menghindari query N+1 di dalam loop
+        $machineNames = $allInspectionTables->pluck('name')->toArray();
+
+        $activeProblems = DB::table('log')
+            ->whereIn('tipe_mesin', $machineNames)
+            ->where('status', 'ON')
+            ->get()
+            ->keyBy('tipe_mesin'); // Kelompokkan berdasarkan nama mesin
+
+        $latestProductions = ProductionData::whereIn('machine_name', $machineNames)
+            ->orderBy('timestamp', 'desc')
+            ->get()
+            ->unique('machine_name') // Ambil yang paling baru untuk setiap mesin
+            ->keyBy('machine_name'); // Kelompokkan berdasarkan nama mesin
+
+        foreach ($allInspectionTables as $table) {
+            $machineName = $table->name;
+            $lineNumber = $table->line_number;
+
+            $activeProblem = $activeProblems->get($machineName);
+            $latestProduction = $latestProductions->get($machineName);
+
+            $statusData = [
+                'name' => $machineName,
                 'status' => $activeProblem ? 'problem' : 'normal',
-                'color' => $activeProblem ? 'red' : 'green',
+                'color' => $activeProblem ? 'red' : 'green', // Ini mungkin tidak lagi dipakai langsung di EJS
                 'problem_type' => $activeProblem ? $activeProblem->tipe_problem : null,
                 'timestamp' => $activeProblem ? $activeProblem->timestamp : null,
                 'last_check' => Carbon::now()->format('Y-m-d H:i:s'),
-                'quantity' => $latestProduction ? $latestProduction->quantity : 0
+                'quantity' => $latestProduction ? $latestProduction->quantity : 0,
+                'id' => $table->id // Tambahkan ID meja untuk keperluan frontend
             ];
+
+            // Kelompokkan berdasarkan line_number
+            if (!isset($groupedStatuses[$lineNumber])) {
+                $groupedStatuses[$lineNumber] = [];
+            }
+            $groupedStatuses[$lineNumber][] = $statusData;
         }
         
-        return $statuses;
+        return $groupedStatuses; // Laravel sekarang akan mengembalikan data terkelompok
     }
-
     /**
      * Get daftar problem yang sedang aktif
      */
@@ -90,16 +109,16 @@ class DashboardController extends Controller
     /**
      * API endpoint untuk real-time monitoring (AJAX)
      */
-    public function getStatusApi()
+    public function getStatusApi(Request $request)
     {
-        $machineStatuses = $this->getMachineStatuses();
+        $machineStatusesGroupedByLine = $this->getMachineStatuses($request); 
         $activeProblems = $this->getActiveProblems();
         $newProblems = $this->getNewProblems();
         
         return response()->json([
             'success' => true,
             'data' => [
-                'machine_statuses' => $machineStatuses,
+                'machine_statuses_by_line' => $machineStatusesGroupedByLine, // <-- NAMA KUNCI BARU
                 'active_problems' => $activeProblems,
                 'new_problems' => $newProblems, // untuk trigger notifikasi
                 'timestamp' => Carbon::now()->format('Y-m-d H:i:s')
@@ -281,6 +300,7 @@ class DashboardController extends Controller
             'data' => $stats
         ]);
     }
+
     public function getPlcStatus()
     {
         try {
