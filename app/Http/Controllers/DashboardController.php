@@ -41,38 +41,50 @@ class DashboardController extends Controller
         // Siapkan struktur data yang dikelompokkan per line
         $groupedStatuses = [];
 
-        // Ambil semua data log problem dan production dalam satu query yang efisien
-        // Ini menghindari query N+1 di dalam loop
-        $machineNames = $allInspectionTables->pluck('name')->toArray();
-
+        // Ambil semua data log problem dengan kombinasi tipe_mesin DAN line_number
         $activeProblems = DB::table('log')
-            ->whereIn('tipe_mesin', $machineNames)
             ->where('status', 'ON')
             ->get()
-            ->keyBy('tipe_mesin'); // Kelompokkan berdasarkan nama mesin
+            ->keyBy(function($item) {
+                // PERBAIKAN: Gunakan kombinasi tipe_mesin dan line_number sebagai key
+                return $item->tipe_mesin . '_line_' . $item->line_number;
+            });
 
+        // Ambil data produksi terbaru dengan kombinasi machine_name dan line_number
+        $machineNames = $allInspectionTables->pluck('name')->toArray();
         $latestProductions = ProductionData::whereIn('machine_name', $machineNames)
             ->orderBy('timestamp', 'desc')
             ->get()
-            ->unique('machine_name') // Ambil yang paling baru untuk setiap mesin
-            ->keyBy('machine_name'); // Kelompokkan berdasarkan nama mesin
+            ->unique(function($item) {
+                // PERBAIKAN: Gunakan kombinasi machine_name dan line_number untuk uniqueness
+                return $item->machine_name . '_line_' . ($item->line_number ?? 'default');
+            })
+            ->keyBy(function($item) {
+                return $item->machine_name . '_line_' . ($item->line_number ?? 'default');
+            });
 
         foreach ($allInspectionTables as $table) {
             $machineName = $table->name;
             $lineNumber = $table->line_number;
 
-            $activeProblem = $activeProblems->get($machineName);
-            $latestProduction = $latestProductions->get($machineName);
+            // PERBAIKAN: Cari active problem berdasarkan kombinasi nama mesin DAN line number
+            $problemKey = $machineName . '_line_' . $lineNumber;
+            $activeProblem = $activeProblems->get($problemKey);
+
+            // PERBAIKAN: Cari production data berdasarkan kombinasi nama mesin DAN line number
+            $productionKey = $machineName . '_line_' . $lineNumber;
+            $latestProduction = $latestProductions->get($productionKey);
 
             $statusData = [
                 'name' => $machineName,
+                'line_number' => $lineNumber, // TAMBAHAN: Sertakan line_number dalam response
                 'status' => $activeProblem ? 'problem' : 'normal',
-                'color' => $activeProblem ? 'red' : 'green', // Ini mungkin tidak lagi dipakai langsung di EJS
+                'color' => $activeProblem ? 'red' : 'green',
                 'problem_type' => $activeProblem ? $activeProblem->tipe_problem : null,
                 'timestamp' => $activeProblem ? $activeProblem->timestamp : null,
                 'last_check' => Carbon::now()->format('Y-m-d H:i:s'),
                 'quantity' => $latestProduction ? $latestProduction->quantity : 0,
-                'id' => $table->id // Tambahkan ID meja untuk keperluan frontend
+                'id' => $table->id
             ];
 
             // Kelompokkan berdasarkan line_number
@@ -82,16 +94,24 @@ class DashboardController extends Controller
             $groupedStatuses[$lineNumber][] = $statusData;
         }
         
-        return $groupedStatuses; // Laravel sekarang akan mengembalikan data terkelompok
+        return $groupedStatuses;
     }
     /**
      * Get daftar problem yang sedang aktif
      */
     public function getActiveProblems()
     {
+        // Query sekarang melakukan JOIN untuk mengambil line_number
         return DB::table('log')
-            ->where('status', 'ON')
-            ->orderBy('timestamp', 'desc')
+            ->join('inspection_tables', function ($join) {
+                // Mencocokkan berdasarkan nama meja DAN nomor line untuk akurasi
+                $join->on('log.tipe_mesin', '=', 'inspection_tables.name')
+                    ->on('log.line_number', '=', 'inspection_tables.line_number');
+            })
+            ->where('log.status', 'ON')
+            // Pilih semua kolom dari log dan tambahkan line_number
+            ->select('log.*', 'inspection_tables.line_number')
+            ->orderBy('log.timestamp', 'desc')
             ->get()
             ->map(function($problem) {
                 $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, 'UTC');
@@ -99,6 +119,7 @@ class DashboardController extends Controller
                     'id' => $problem->id,
                     'machine' => $problem->tipe_mesin,
                     'problem_type' => $problem->tipe_problem,
+                    'line_number' => $problem->line_number, // <-- SEKARANG line_number ADA DI SINI
                     'timestamp' => Carbon::parse($problem->timestamp)->format('d/m/Y H:i:s'),
                     'duration' => $problemTimestamp->diffForHumans(),
                     'severity' => $this->getProblemSeverity($problem->tipe_problem)
@@ -133,19 +154,30 @@ class DashboardController extends Controller
     {
         $tenSecondsAgo = Carbon::now()->subSeconds(10);
         
+        // PERBAIKAN: JOIN dengan inspection_tables untuk mendapatkan line_number
         return DB::table('log')
-            ->where('status', 'ON')
-            ->where('timestamp', '>=', $tenSecondsAgo)
-            ->orderBy('timestamp', 'desc')
+            ->join('inspection_tables', function ($join) {
+                $join->on('log.tipe_mesin', '=', 'inspection_tables.name')
+                    ->on('log.line_number', '=', 'inspection_tables.line_number');
+            })
+            ->where('log.status', 'ON')
+            ->where('log.timestamp', '>=', $tenSecondsAgo)
+            ->select('log.*', 'inspection_tables.line_number as verified_line_number')
+            ->orderBy('log.timestamp', 'desc')
             ->get()
             ->map(function($problem) {
                 return [
                     'id' => $problem->id,
                     'machine' => $problem->tipe_mesin,
+                    'machine_name' => $problem->tipe_mesin,
+                    'line_number' => $problem->verified_line_number, // Gunakan line_number yang sudah diverifikasi
                     'problem_type' => $problem->tipe_problem,
+                    'problemType' => $problem->tipe_problem,
                     'timestamp' => Carbon::parse($problem->timestamp)->format('H:i:s'),
                     'message' => "ALERT: {$problem->tipe_mesin} mengalami masalah {$problem->tipe_problem}!",
-                    'severity' => $this->getProblemSeverity($problem->tipe_problem)
+                    'severity' => $this->getProblemSeverity($problem->tipe_problem),
+                    'description' => $this->getProblemDescription($problem->tipe_problem),
+                    'recommended_action' => $this->getRecommendedAction($problem->tipe_problem)
                 ];
             });
     }
@@ -280,19 +312,42 @@ class DashboardController extends Controller
     /**
      * Get statistik dashboard
      */
-    public function getDashboardStats()
+    // app/Http/Controllers/DashboardController.php
+
+    public function getDashboardStats(Request $request)
     {
+        // Ambil line_number dari permintaan. Jika tidak ada, nilainya akan null.
+        $lineNumber = $request->input('line_number');
+        $userTimezone = config('app.timezone'); // Mengambil timezone dari config
+
+        // --- Query untuk Total Meja ---
+        $totalMachinesQuery = \App\Models\InspectionTable::query();
+        if ($lineNumber) {
+            // Jika ada line_number, filter berdasarkan itu.
+            $totalMachinesQuery->where('line_number', $lineNumber);
+        }
+
+        // --- Query untuk Log Problem ---
+        $logQuery = \App\Models\Log::query();
+        if ($lineNumber) {
+            // Jika ada line_number, filter berdasarkan itu.
+            $logQuery->where('line_number', $lineNumber);
+        }
+        
+        // Buat klon query untuk penggunaan berulang agar lebih efisien
+        $activeProblemsQuery = clone $logQuery;
+        $resolvedTodayQuery = clone $logQuery;
+        $criticalProblemsQuery = clone $logQuery;
+
         $stats = [
-            'total_machines' => InspectionTable::count(), 
-            'active_problems' => DB::table('log')->where('status', 'ON')->count(),
-            'resolved_today' => DB::table('log')
-                ->where('status', 'OFF')
-                ->whereDate('resolved_at', Carbon::today())
-                ->count(),
-            'critical_problems' => DB::table('log')
-                ->where('status', 'ON')
-                ->where('tipe_problem', 'Safety')
-                ->count()
+            'total_machines' => $totalMachinesQuery->count(),
+            'active_problems' => $activeProblemsQuery->where('status', 'ON')->count(),
+            'resolved_today' => $resolvedTodayQuery->where('status', 'OFF')
+                                                ->whereDate('resolved_at', \Carbon\Carbon::today($userTimezone))
+                                                ->count(),
+            'critical_problems' => $criticalProblemsQuery->where('status', 'ON')
+                                                        ->where('tipe_problem', 'Machine') // Pastikan ini tipe problem kritis Anda
+                                                        ->count(),
         ];
 
         return response()->json([

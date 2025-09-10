@@ -29,3 +29,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/machine-status/{name}', [InspectionTableController::class, 'getMachineStatus']);
     Route::get('dashboard/status', [DashboardController::class, 'getStatusApi']);
 });
+
+Route::get('/health-check', function () {
+    return response()->json(['status' => 'ok']);
+});

@@ -19,6 +19,7 @@ class Log extends Model
         'timestamp',
         'tipe_mesin', 
         'tipe_problem',
+        'line_number',
         'status',
         'resolved_at', 
         'duration_in_seconds'
