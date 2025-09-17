@@ -389,4 +389,112 @@ class DashboardController extends Controller
             ]
         ], 502);
     }
+
+    public function forwardProblem(Request $request, $id)
+    {
+        // Ambil token dari request header
+        $token = $request->bearerToken() ?? $request->header('Authorization');
+        if (!$token) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Token required'
+            ], 401);
+        }
+
+        // Validasi token dan ambil user data
+        try {
+            $session = DB::table('user_sessions')
+                ->join('users', 'user_sessions.user_id', '=', 'users.id')
+                ->where('user_sessions.token', str_replace('Bearer ', '', $token))
+                ->where('users.active', 1)
+                ->where('user_sessions.expires_at', '>', Carbon::now())
+                ->select('users.id', 'users.name', 'users.role', 'users.line_number')
+                ->first();
+
+            if (!$session) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unauthorized'
+                ], 401);
+            }
+
+            // Validasi bahwa yang melakukan forward adalah leader
+            if ($session->role !== 'leader') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Hanya leader yang dapat melakukan forward problem.'
+                ], 403);
+            }
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Server error during authentication'
+            ], 500);
+        }
+
+        // Cari problem yang statusnya masih 'ON' berdasarkan ID
+        $problem = Log::where('id', $id)->where('status', 'ON')->first();
+
+        if (!$problem) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Problem tidak ditemukan atau sudah diselesaikan.'
+            ], 404);
+        }
+
+        // Cek apakah problem sudah pernah di-forward
+        if ($problem->is_forwarded) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Problem ini sudah pernah diteruskan.'
+            ], 400);
+        }
+
+        // Tentukan target user berdasarkan tipe problem
+        $targetRole = null;
+        switch (strtolower($problem->tipe_problem)) {
+            case 'machine':
+                $targetRole = 'maintenance';
+                break;
+            case 'quality':
+                $targetRole = 'quality';
+                break;
+            case 'material':
+                $targetRole = 'warehouse';
+                break;
+            default:
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Tipe problem tidak dikenal untuk forward.'
+                ], 400);
+        }
+
+        // Update problem di database
+        $problem->update([
+            'is_forwarded' => true,
+            'forwarded_to_role' => $targetRole,
+            'forwarded_by_user_id' => $session->id,
+            'forwarded_at' => now(),
+            'forward_message' => $request->input('message', 'Problem telah diteruskan untuk penanganan.')
+        ]);
+        
+        $forwardData = [
+            'problem_id' => $problem->id,
+            'machine_name' => $problem->tipe_mesin,
+            'problem_type' => $problem->tipe_problem,
+            'line_number' => $problem->line_number,
+            'target_role' => $targetRole,
+            'forwarded_by' => $session->name,
+            'forwarded_by_id' => $session->id,
+            'forwarded_at' => now(),
+            'message' => $request->input('message', 'Problem telah diteruskan untuk penanganan.')
+        ];
+
+        return response()->json([
+            'success' => true,
+            'message' => "Problem berhasil diteruskan ke tim {$targetRole}",
+            'data' => $forwardData
+        ]);
+    }
 }

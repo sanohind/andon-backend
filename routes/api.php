@@ -20,6 +20,7 @@ Route::prefix('dashboard')->group(function () {
     Route::get('/stats', [DashboardController::class, 'getDashboardStats']);
     Route::get('/analytics', [AnalyticsController::class, 'getAnalyticsData']);
     Route::get('/plc-status', [DashboardController::class, 'getPlcStatus']);
+    Route::post('/problem/{id}/forward', [DashboardController::class, 'forwardProblem']);
 });
 
 Route::middleware('auth:sanctum')->group(function () {
