@@ -19,8 +19,16 @@ Route::prefix('dashboard')->group(function () {
     Route::patch('/problem/{id}/status', [DashboardController::class, 'updateProblemStatus']);
     Route::get('/stats', [DashboardController::class, 'getDashboardStats']);
     Route::get('/analytics', [AnalyticsController::class, 'getAnalyticsData']);
+    Route::get('/analytics/duration', [AnalyticsController::class, 'getProblemDurationAnalytics']);
     Route::get('/plc-status', [DashboardController::class, 'getPlcStatus']);
+    
+    // Forward Problem Routes
     Route::post('/problem/{id}/forward', [DashboardController::class, 'forwardProblem']);
+    Route::post('/problem/{id}/receive', [DashboardController::class, 'receiveProblem']);
+    Route::post('/problem/{id}/feedback-resolved', [DashboardController::class, 'feedbackResolved']);
+    Route::post('/problem/{id}/final-resolved', [DashboardController::class, 'finalResolved']);
+    Route::get('/forward-logs', [DashboardController::class, 'getForwardLogs']);
+    Route::get('/forward-logs/{problemId}', [DashboardController::class, 'getForwardLogs']);
 });
 
 Route::middleware('auth:sanctum')->group(function () {

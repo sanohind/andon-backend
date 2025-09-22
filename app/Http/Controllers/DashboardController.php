@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Log;
 use App\Models\ProductionData;
 use App\Models\InspectionTable;
+use App\Models\ForwardProblemLog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -96,90 +97,240 @@ class DashboardController extends Controller
         
         return $groupedStatuses;
     }
+
     /**
-     * Get daftar problem yang sedang aktif
+     * Get status semua mesin dengan role-based filtering
      */
-    public function getActiveProblems()
+    public function getMachineStatusesWithRoleFilter(Request $request, $userRole = null, $userLineNumber = null)
     {
-        // Query sekarang melakukan JOIN untuk mengambil line_number
-        return DB::table('log')
-            ->join('inspection_tables', function ($join) {
-                // Mencocokkan berdasarkan nama meja DAN nomor line untuk akurasi
-                $join->on('log.tipe_mesin', '=', 'inspection_tables.name')
-                    ->on('log.line_number', '=', 'inspection_tables.line_number');
-            })
-            ->where('log.status', 'ON')
-            // Pilih semua kolom dari log dan tambahkan line_number
-            ->select('log.*', 'inspection_tables.line_number')
-            ->orderBy('log.timestamp', 'desc')
+        // Ambil SEMUA meja, karena filter akan dilakukan di frontend Node.js/EJS
+        $allInspectionTables = InspectionTable::orderBy('line_number')->orderBy('name')->get();
+        
+        // Siapkan struktur data yang dikelompokkan per line
+        $groupedStatuses = [];
+
+        // Ambil semua data log problem dengan kombinasi tipe_mesin DAN line_number
+        $activeProblems = DB::table('log')
+            ->where('status', 'ON')
             ->get()
-            ->map(function($problem) {
-                $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, 'UTC');
-                return [
-                    'id' => $problem->id,
-                    'machine' => $problem->tipe_mesin,
-                    'problem_type' => $problem->tipe_problem,
-                    'line_number' => $problem->line_number, // <-- SEKARANG line_number ADA DI SINI
-                    'timestamp' => Carbon::parse($problem->timestamp)->format('d/m/Y H:i:s'),
-                    'duration' => $problemTimestamp->diffForHumans(),
-                    'severity' => $this->getProblemSeverity($problem->tipe_problem)
-                ];
+            ->keyBy(function($item) {
+                // PERBAIKAN: Gunakan kombinasi tipe_mesin dan line_number sebagai key
+                return $item->tipe_mesin . '_line_' . $item->line_number;
             });
+
+        // Ambil data produksi terbaru dengan kombinasi machine_name dan line_number
+        $machineNames = $allInspectionTables->pluck('name')->toArray();
+        $latestProductions = ProductionData::whereIn('machine_name', $machineNames)
+            ->orderBy('timestamp', 'desc')
+            ->get()
+            ->unique(function($item) {
+                // PERBAIKAN: Gunakan kombinasi machine_name dan line_number untuk uniqueness
+                return $item->machine_name . '_line_' . ($item->line_number ?? 'default');
+            })
+            ->keyBy(function($item) {
+                return $item->machine_name . '_line_' . ($item->line_number ?? 'default');
+            });
+
+        foreach ($allInspectionTables as $table) {
+            $machineName = $table->name;
+            $lineNumber = $table->line_number;
+
+            // PERBAIKAN: Cari active problem berdasarkan kombinasi nama mesin DAN line number
+            $problemKey = $machineName . '_line_' . $lineNumber;
+            $activeProblem = $activeProblems->get($problemKey);
+
+            // PERBAIKAN: Cari production data berdasarkan kombinasi nama mesin DAN line number
+            $productionKey = $machineName . '_line_' . $lineNumber;
+            $latestProduction = $latestProductions->get($productionKey);
+
+            // Tentukan status berdasarkan role user
+            $machineStatus = 'normal';
+            $problemType = null;
+            $timestamp = null;
+
+            if ($activeProblem) {
+                // Cek apakah problem ini boleh ditampilkan untuk user role ini
+                $shouldShowProblem = true;
+
+                if (in_array($userRole, ['maintenance', 'quality', 'warehouse'])) {
+                    // Department users hanya melihat problem jika sudah di-forward ke mereka
+                    $shouldShowProblem = $activeProblem->is_forwarded && $activeProblem->forwarded_to_role === $userRole;
+                } elseif ($userRole === 'leader') {
+                    // Leader hanya melihat problem dari line mereka
+                    $shouldShowProblem = $activeProblem->line_number == $userLineNumber;
+                } elseif ($userRole === 'admin') {
+                    // Admin melihat semua problem
+                    $shouldShowProblem = true;
+                }
+
+                if ($shouldShowProblem) {
+                    $machineStatus = 'problem';
+                    $problemType = $activeProblem->tipe_problem;
+                    $timestamp = $activeProblem->timestamp;
+                }
+            }
+
+            $statusData = [
+                'name' => $machineName,
+                'line_number' => $lineNumber,
+                'status' => $machineStatus,
+                'color' => $machineStatus === 'problem' ? 'red' : 'green',
+                'problem_type' => $problemType,
+                'timestamp' => $timestamp,
+                'last_check' => Carbon::now()->format('Y-m-d H:i:s'),
+                'quantity' => $latestProduction ? $latestProduction->quantity : 0,
+                'id' => $table->id
+            ];
+
+            // Kelompokkan berdasarkan line_number
+            if (!isset($groupedStatuses[$lineNumber])) {
+                $groupedStatuses[$lineNumber] = [];
+            }
+            $groupedStatuses[$lineNumber][] = $statusData;
+        }
+        
+        return $groupedStatuses;
     }
 
     /**
-     * API endpoint untuk real-time monitoring (AJAX)
+     * Get daftar problem yang sedang aktif dengan role-based visibility
+     */
+    public function getActiveProblems(Request $request = null, $userRole = null, $userLineNumber = null)
+    {
+        $query = Log::active()
+            ->with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])
+            ->orderBy('timestamp', 'desc');
+
+        // PERBAIKAN: Tidak melakukan filtering di backend karena filtering dilakukan di Node.js
+        // if ($userRole) {
+        //     $query = $query->visibleToRole($userRole, $userLineNumber);
+        // }
+
+        return $query->get()->map(function($problem) {
+            $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, 'UTC');
+            
+            // Calculate problem status based on current state
+            $problemStatus = 'active';
+            if ($problem->status === 'OFF') {
+                $problemStatus = 'resolved';
+            } elseif ($problem->has_feedback_resolved) {
+                $problemStatus = 'feedback_resolved';
+            } elseif ($problem->is_received) {
+                $problemStatus = 'received';
+            } elseif ($problem->is_forwarded) {
+                $problemStatus = 'forwarded';
+            }
+            
+            return [
+                'id' => $problem->id,
+                'machine' => $problem->tipe_mesin,
+                'problem_type' => $problem->tipe_problem,
+                'line_number' => $problem->line_number,
+                'timestamp' => Carbon::parse($problem->timestamp)->format('d/m/Y H:i:s'),
+                'duration' => $problemTimestamp->diffForHumans(),
+                'severity' => $this->getProblemSeverity($problem->tipe_problem),
+                'problem_status' => $problemStatus,
+                'status' => $problem->status,
+                'is_forwarded' => $problem->is_forwarded,
+                'forwarded_to_role' => $problem->forwarded_to_role,
+                'forwarded_by' => $problem->forwardedByUser ? $problem->forwardedByUser->name : null,
+                'forwarded_at' => $problem->forwarded_at ? Carbon::parse($problem->forwarded_at)->format('d/m/Y H:i:s') : null,
+                'is_received' => $problem->is_received,
+                'received_by' => $problem->receivedByUser ? $problem->receivedByUser->name : null,
+                'received_at' => $problem->received_at ? Carbon::parse($problem->received_at)->format('d/m/Y H:i:s') : null,
+                'has_feedback_resolved' => $problem->has_feedback_resolved,
+                'feedback_resolved_by' => $problem->feedbackResolvedByUser ? $problem->feedbackResolvedByUser->name : null,
+                'feedback_resolved_at' => $problem->feedback_resolved_at ? Carbon::parse($problem->feedback_resolved_at)->format('d/m/Y H:i:s') : null,
+                'forward_message' => $problem->forward_message,
+                'feedback_message' => $problem->feedback_message
+            ];
+        });
+    }
+
+    /**
+     * API endpoint untuk real-time monitoring (AJAX) dengan role-based visibility
      */
     public function getStatusApi(Request $request)
     {
+        // Get user info from token if available
+        $userRole = null;
+        $userLineNumber = null;
+        
+        $token = $request->bearerToken() ?? $request->header('Authorization');
+        if ($token) {
+            try {
+                $session = DB::table('user_sessions')
+                    ->join('users', 'user_sessions.user_id', '=', 'users.id')
+                    ->where('user_sessions.token', str_replace('Bearer ', '', $token))
+                    ->where('users.active', 1)
+                    ->where('user_sessions.expires_at', '>', Carbon::now())
+                    ->select('users.role', 'users.line_number')
+                    ->first();
+
+                if ($session) {
+                    $userRole = $session->role;
+                    $userLineNumber = $session->line_number;
+                }
+            } catch (\Exception $e) {
+                // Continue without user info if token validation fails
+            }
+        }
+
         $machineStatusesGroupedByLine = $this->getMachineStatuses($request); 
-        $activeProblems = $this->getActiveProblems();
-        $newProblems = $this->getNewProblems();
+        $activeProblems = $this->getActiveProblems($request, $userRole, $userLineNumber);
+        $newProblems = $this->getNewProblems($request, $userRole, $userLineNumber);
         
         return response()->json([
             'success' => true,
             'data' => [
-                'machine_statuses_by_line' => $machineStatusesGroupedByLine, // <-- NAMA KUNCI BARU
+                'machine_statuses_by_line' => $machineStatusesGroupedByLine,
                 'active_problems' => $activeProblems,
-                'new_problems' => $newProblems, // untuk trigger notifikasi
+                'new_problems' => $newProblems,
+                'user_role' => $userRole,
+                'user_line_number' => $userLineNumber,
                 'timestamp' => Carbon::now()->format('Y-m-d H:i:s')
             ]
         ]);
     }
 
     /**
-     * Get problem baru dalam 10 detik terakhir (untuk notifikasi)
+     * Get problem baru dalam 10 detik terakhir (untuk notifikasi) dengan role-based visibility
      */
-    public function getNewProblems()
+    public function getNewProblems(Request $request = null, $userRole = null, $userLineNumber = null)
     {
         $tenSecondsAgo = Carbon::now()->subSeconds(10);
         
-        // PERBAIKAN: JOIN dengan inspection_tables untuk mendapatkan line_number
-        return DB::table('log')
-            ->join('inspection_tables', function ($join) {
-                $join->on('log.tipe_mesin', '=', 'inspection_tables.name')
-                    ->on('log.line_number', '=', 'inspection_tables.line_number');
-            })
-            ->where('log.status', 'ON')
-            ->where('log.timestamp', '>=', $tenSecondsAgo)
-            ->select('log.*', 'inspection_tables.line_number as verified_line_number')
-            ->orderBy('log.timestamp', 'desc')
-            ->get()
-            ->map(function($problem) {
-                return [
-                    'id' => $problem->id,
-                    'machine' => $problem->tipe_mesin,
-                    'machine_name' => $problem->tipe_mesin,
-                    'line_number' => $problem->verified_line_number, // Gunakan line_number yang sudah diverifikasi
-                    'problem_type' => $problem->tipe_problem,
-                    'problemType' => $problem->tipe_problem,
-                    'timestamp' => Carbon::parse($problem->timestamp)->format('H:i:s'),
-                    'message' => "ALERT: {$problem->tipe_mesin} mengalami masalah {$problem->tipe_problem}!",
-                    'severity' => $this->getProblemSeverity($problem->tipe_problem),
-                    'description' => $this->getProblemDescription($problem->tipe_problem),
-                    'recommended_action' => $this->getRecommendedAction($problem->tipe_problem)
-                ];
-            });
+        $query = Log::active()
+            ->where('timestamp', '>=', $tenSecondsAgo)
+            ->orderBy('timestamp', 'desc');
+
+        // PERBAIKAN: Tidak melakukan filtering di backend karena filtering dilakukan di Node.js
+        // if ($userRole) {
+        //     $query = $query->visibleToRole($userRole, $userLineNumber);
+        // }
+
+        // PERBAIKAN: Department users tidak boleh menerima notifikasi problem baru
+        // Mereka hanya menerima notifikasi ketika problem di-forward ke mereka
+        // if (in_array($userRole, ['maintenance', 'quality', 'warehouse'])) {
+        //     return collect([]); // Return empty collection untuk department users
+        // }
+
+        return $query->get()->map(function($problem) {
+            return [
+                'id' => $problem->id,
+                'machine' => $problem->tipe_mesin,
+                'machine_name' => $problem->tipe_mesin,
+                'line_number' => $problem->line_number,
+                'problem_type' => $problem->tipe_problem,
+                'problemType' => $problem->tipe_problem,
+                'timestamp' => Carbon::parse($problem->timestamp)->format('H:i:s'),
+                'message' => "ALERT: {$problem->tipe_mesin} mengalami masalah {$problem->tipe_problem}!",
+                'severity' => $this->getProblemSeverity($problem->tipe_problem),
+                'description' => $this->getProblemDescription($problem->tipe_problem),
+                'recommended_action' => $this->getRecommendedAction($problem->tipe_problem),
+                'problem_status' => $problem->problem_status
+            ];
+        });
     }
 
     /**
@@ -187,7 +338,7 @@ class DashboardController extends Controller
      */
     public function getProblemDetail($id)
     {
-        $problem = DB::table('log')->where('id', $id)->first();
+        $problem = Log::with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])->find($id);
         
         if (!$problem) {
             return response()->json([
@@ -195,17 +346,45 @@ class DashboardController extends Controller
                 'message' => 'Problem tidak ditemukan'
             ], 404);
         }
+        
         $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, 'UTC');
+        
+        // Calculate problem status based on current state
+        $problemStatus = 'active';
+        if ($problem->status === 'OFF') {
+            $problemStatus = 'resolved';
+        } elseif ($problem->has_feedback_resolved) {
+            $problemStatus = 'feedback_resolved';
+        } elseif ($problem->is_received) {
+            $problemStatus = 'received';
+        } elseif ($problem->is_forwarded) {
+            $problemStatus = 'forwarded';
+        }
+        
         $detail = [
             'id' => $problem->id,
             'machine' => $problem->tipe_mesin,
             'problem_type' => $problem->tipe_problem,
+            'line_number' => $problem->line_number,
             'status' => $problem->status,
+            'problem_status' => $problemStatus,
             'timestamp' => Carbon::parse($problem->timestamp)->format('d/m/Y H:i:s'),
             'duration' => $problemTimestamp->diffForHumans(),
             'severity' => $this->getProblemSeverity($problem->tipe_problem),
             'recommended_action' => $this->getRecommendedAction($problem->tipe_problem),
-            'description' => $this->getProblemDescription($problem->tipe_problem)
+            'description' => $this->getProblemDescription($problem->tipe_problem),
+            'is_forwarded' => $problem->is_forwarded,
+            'forwarded_to_role' => $problem->forwarded_to_role,
+            'forwarded_by' => $problem->forwardedByUser ? $problem->forwardedByUser->name : null,
+            'forwarded_at' => $problem->forwarded_at ? Carbon::parse($problem->forwarded_at)->format('d/m/Y H:i:s') : null,
+            'is_received' => $problem->is_received,
+            'received_by' => $problem->receivedByUser ? $problem->receivedByUser->name : null,
+            'received_at' => $problem->received_at ? Carbon::parse($problem->received_at)->format('d/m/Y H:i:s') : null,
+            'has_feedback_resolved' => $problem->has_feedback_resolved,
+            'feedback_resolved_by' => $problem->feedbackResolvedByUser ? $problem->feedbackResolvedByUser->name : null,
+            'feedback_resolved_at' => $problem->feedback_resolved_at ? Carbon::parse($problem->feedback_resolved_at)->format('d/m/Y H:i:s') : null,
+            'forward_message' => $problem->forward_message,
+            'feedback_message' => $problem->feedback_message
         ];
 
         return response()->json([
@@ -491,10 +670,371 @@ class DashboardController extends Controller
             'message' => $request->input('message', 'Problem telah diteruskan untuk penanganan.')
         ];
 
+        // Log forward event
+        ForwardProblemLog::logEvent(
+            $problem->id,
+            ForwardProblemLog::EVENT_FORWARD,
+            $session->id,
+            $session->role,
+            $targetRole,
+            $request->input('message', 'Problem telah diteruskan untuk penanganan.'),
+            [
+                'machine_name' => $problem->tipe_mesin,
+                'problem_type' => $problem->tipe_problem,
+                'line_number' => $problem->line_number
+            ]
+        );
+
         return response()->json([
             'success' => true,
             'message' => "Problem berhasil diteruskan ke tim {$targetRole}",
             'data' => $forwardData
+        ]);
+    }
+
+    /**
+     * Receive problem (untuk user department)
+     */
+    public function receiveProblem(Request $request, $id)
+    {
+        // Ambil token dari request header
+        $token = $request->bearerToken() ?? $request->header('Authorization');
+        if (!$token) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Token required'
+            ], 401);
+        }
+
+        // Validasi token dan ambil user data
+        try {
+            $session = DB::table('user_sessions')
+                ->join('users', 'user_sessions.user_id', '=', 'users.id')
+                ->where('user_sessions.token', str_replace('Bearer ', '', $token))
+                ->where('users.active', 1)
+                ->where('user_sessions.expires_at', '>', Carbon::now())
+                ->select('users.id', 'users.name', 'users.role', 'users.line_number')
+                ->first();
+
+            if (!$session) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unauthorized'
+                ], 401);
+            }
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Server error during authentication'
+            ], 500);
+        }
+
+        // Cari problem yang statusnya masih 'ON' berdasarkan ID
+        $problem = Log::where('id', $id)->where('status', 'ON')->first();
+
+        if (!$problem) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Problem tidak ditemukan atau sudah diselesaikan.'
+            ], 404);
+        }
+
+        // Validasi bahwa problem bisa diterima oleh user ini
+        if (!$problem->canBeReceivedBy((object)$session)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Problem tidak bisa diterima oleh user ini.'
+            ], 403);
+        }
+
+        // Update problem di database
+        $problem->update([
+            'is_received' => true,
+            'received_by_user_id' => $session->id,
+            'received_at' => now()
+        ]);
+
+        // Log receive event
+        ForwardProblemLog::logEvent(
+            $problem->id,
+            ForwardProblemLog::EVENT_RECEIVE,
+            $session->id,
+            $session->role,
+            null,
+            'Problem telah diterima untuk penanganan.',
+            [
+                'machine_name' => $problem->tipe_mesin,
+                'problem_type' => $problem->tipe_problem,
+                'line_number' => $problem->line_number
+            ]
+        );
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Problem berhasil diterima',
+            'data' => [
+                'problem_id' => $problem->id,
+                'received_by' => $session->name,
+                'received_at' => now()->format('d/m/Y H:i:s')
+            ]
+        ]);
+    }
+
+    /**
+     * Feedback resolved (untuk user department)
+     */
+    public function feedbackResolved(Request $request, $id)
+    {
+        // Ambil token dari request header
+        $token = $request->bearerToken() ?? $request->header('Authorization');
+        if (!$token) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Token required'
+            ], 401);
+        }
+
+        // Validasi token dan ambil user data
+        try {
+            $session = DB::table('user_sessions')
+                ->join('users', 'user_sessions.user_id', '=', 'users.id')
+                ->where('user_sessions.token', str_replace('Bearer ', '', $token))
+                ->where('users.active', 1)
+                ->where('user_sessions.expires_at', '>', Carbon::now())
+                ->select('users.id', 'users.name', 'users.role', 'users.line_number')
+                ->first();
+
+            if (!$session) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unauthorized'
+                ], 401);
+            }
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Server error during authentication'
+            ], 500);
+        }
+
+        // Cari problem yang statusnya masih 'ON' berdasarkan ID
+        $problem = Log::where('id', $id)->where('status', 'ON')->first();
+
+        if (!$problem) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Problem tidak ditemukan atau sudah diselesaikan.'
+            ], 404);
+        }
+
+        // Validasi bahwa problem bisa di-feedback resolved oleh user ini
+        if (!$problem->canBeFeedbackResolvedBy((object)$session)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Problem tidak bisa di-feedback resolved oleh user ini.'
+            ], 403);
+        }
+
+        // Update problem di database
+        $problem->update([
+            'has_feedback_resolved' => true,
+            'feedback_resolved_by_user_id' => $session->id,
+            'feedback_resolved_at' => now(),
+            'feedback_message' => $request->input('message', 'Problem sudah selesai ditangani.')
+        ]);
+
+        // Log feedback resolved event
+        ForwardProblemLog::logEvent(
+            $problem->id,
+            ForwardProblemLog::EVENT_FEEDBACK_RESOLVED,
+            $session->id,
+            $session->role,
+            null,
+            $request->input('message', 'Problem sudah selesai ditangani.'),
+            [
+                'machine_name' => $problem->tipe_mesin,
+                'problem_type' => $problem->tipe_problem,
+                'line_number' => $problem->line_number
+            ]
+        );
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Feedback problem selesai berhasil dikirim ke leader',
+            'data' => [
+                'problem_id' => $problem->id,
+                'feedback_by' => $session->name,
+                'feedback_at' => now()->format('d/m/Y H:i:s'),
+                'message' => $request->input('message', 'Problem sudah selesai ditangani.')
+            ]
+        ]);
+    }
+
+    /**
+     * Final resolved (untuk leader)
+     */
+    public function finalResolved(Request $request, $id)
+    {
+        // Ambil token dari request header
+        $token = $request->bearerToken() ?? $request->header('Authorization');
+        if (!$token) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Token required'
+            ], 401);
+        }
+
+        // Validasi token dan ambil user data
+        try {
+            $session = DB::table('user_sessions')
+                ->join('users', 'user_sessions.user_id', '=', 'users.id')
+                ->where('user_sessions.token', str_replace('Bearer ', '', $token))
+                ->where('users.active', 1)
+                ->where('user_sessions.expires_at', '>', Carbon::now())
+                ->select('users.id', 'users.name', 'users.role', 'users.line_number')
+                ->first();
+
+            if (!$session) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unauthorized'
+                ], 401);
+            }
+
+            // Validasi bahwa yang melakukan final resolved adalah leader
+            if ($session->role !== 'leader') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Hanya leader yang dapat melakukan final resolved problem.'
+                ], 403);
+            }
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Server error during authentication'
+            ], 500);
+        }
+
+        // Cari problem yang statusnya masih 'ON' berdasarkan ID
+        $problem = Log::where('id', $id)->where('status', 'ON')->first();
+
+        if (!$problem) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Problem tidak ditemukan atau sudah diselesaikan.'
+            ], 404);
+        }
+
+        // Validasi bahwa problem bisa di-final resolved oleh user ini
+        // Cek apakah ini direct resolve atau final resolve setelah feedback
+        $isDirectResolve = !$problem->is_forwarded;
+        
+        if ($isDirectResolve) {
+            // Direct resolve - problem belum di-forward
+            if (!$problem->canBeDirectResolvedBy((object)$session)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Problem tidak bisa di-direct resolved oleh user ini.'
+                ], 403);
+            }
+        } else {
+            // Final resolve setelah feedback
+            if (!$problem->canBeFinalResolvedBy((object)$session)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Problem tidak bisa di-final resolved oleh user ini.'
+                ], 403);
+            }
+        }
+
+        // Update problem status ke OFF
+        $problem->status = 'OFF';
+        $problem->resolved_at = now();
+
+        // Hitung durasi final yang akurat
+        $timestampString = $problem->getRawOriginal('timestamp');
+        $startTime = \Carbon\Carbon::createFromFormat('Y-m-d H:i:s', $timestampString, 'UTC');
+        $problem->duration_in_seconds = abs($problem->resolved_at->diffInSeconds($startTime));
+
+        $problem->save();
+
+        // Log resolved event
+        $eventType = $isDirectResolve ? 'direct_resolved' : ForwardProblemLog::EVENT_FINAL_RESOLVED;
+        $message = $isDirectResolve ? 'Problem diselesaikan secara langsung oleh leader.' : 'Problem diselesaikan secara final oleh leader.';
+        
+        ForwardProblemLog::logEvent(
+            $problem->id,
+            $eventType,
+            $session->id,
+            $session->role,
+            null,
+            $message,
+            [
+                'machine_name' => $problem->tipe_mesin,
+                'problem_type' => $problem->tipe_problem,
+                'line_number' => $problem->line_number,
+                'duration_seconds' => $problem->duration_in_seconds,
+                'is_direct_resolve' => $isDirectResolve
+            ]
+        );
+
+        return response()->json([
+            'success' => true,
+            'message' => $isDirectResolve ? 'Problem berhasil diselesaikan secara langsung' : 'Problem berhasil diselesaikan secara final',
+            'data' => [
+                'problem_id' => $problem->id,
+                'resolved_by' => $session->name,
+                'resolved_at' => now()->format('d/m/Y H:i:s'),
+                'duration_seconds' => $problem->duration_in_seconds
+            ]
+        ]);
+    }
+
+    /**
+     * Get forward problem logs untuk analisis
+     */
+    public function getForwardLogs(Request $request, $problemId = null)
+    {
+        $query = ForwardProblemLog::with(['problem', 'user'])
+            ->orderBy('event_timestamp', 'desc');
+
+        if ($problemId) {
+            $query->where('problem_id', $problemId);
+        }
+
+        // Filter berdasarkan tanggal jika ada
+        if ($request->has('start_date')) {
+            $query->where('event_timestamp', '>=', $request->input('start_date'));
+        }
+
+        if ($request->has('end_date')) {
+            $query->where('event_timestamp', '<=', $request->input('end_date'));
+        }
+
+        $logs = $query->get()->map(function($log) {
+            return [
+                'id' => $log->id,
+                'problem_id' => $log->problem_id,
+                'event_type' => $log->event_type,
+                'event_description' => $log->event_description,
+                'user_name' => $log->user ? $log->user->name : 'Unknown',
+                'user_role' => $log->user_role,
+                'target_role' => $log->target_role,
+                'message' => $log->message,
+                'event_timestamp' => $log->formatted_event_timestamp,
+                'machine_name' => $log->problem ? $log->problem->tipe_mesin : 'Unknown',
+                'problem_type' => $log->problem ? $log->problem->tipe_problem : 'Unknown',
+                'line_number' => $log->problem ? $log->problem->line_number : 'Unknown',
+                'metadata' => $log->metadata
+            ];
+        });
+
+        return response()->json([
+            'success' => true,
+            'data' => $logs
         ]);
     }
 }

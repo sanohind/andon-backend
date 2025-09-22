@@ -13,24 +13,7 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('log', function (Blueprint $table) {
-            // Kolom forward (jika belum ada)
-            if (!Schema::hasColumn('log', 'is_forwarded')) {
-                $table->boolean('is_forwarded')->default(false)->after('status');
-            }
-            if (!Schema::hasColumn('log', 'forwarded_to_role')) {
-                $table->string('forwarded_to_role')->nullable()->after('is_forwarded');
-            }
-            if (!Schema::hasColumn('log', 'forwarded_by_user_id')) {
-                $table->unsignedBigInteger('forwarded_by_user_id')->nullable()->after('forwarded_to_role');
-            }
-            if (!Schema::hasColumn('log', 'forwarded_at')) {
-                $table->timestamp('forwarded_at')->nullable()->after('forwarded_by_user_id');
-            }
-            if (!Schema::hasColumn('log', 'forward_message')) {
-                $table->text('forward_message')->nullable()->after('forwarded_at');
-            }
-            
-            // Kolom receive (baru)
+            // Tambahkan kolom receive jika belum ada
             if (!Schema::hasColumn('log', 'is_received')) {
                 $table->boolean('is_received')->default(false)->after('forward_message');
             }
@@ -41,7 +24,7 @@ return new class extends Migration
                 $table->timestamp('received_at')->nullable()->after('received_by_user_id');
             }
             
-            // Kolom feedback resolved (baru)
+            // Tambahkan kolom feedback resolved jika belum ada
             if (!Schema::hasColumn('log', 'has_feedback_resolved')) {
                 $table->boolean('has_feedback_resolved')->default(false)->after('received_at');
             }
@@ -59,18 +42,6 @@ return new class extends Migration
         // Tambahkan foreign keys jika belum ada
         Schema::table('log', function (Blueprint $table) {
             // Check if foreign key exists before adding
-            $foreignKeys = DB::select("
-                SELECT constraint_name 
-                FROM information_schema.table_constraints 
-                WHERE table_name = 'log' 
-                AND constraint_type = 'FOREIGN KEY'
-                AND constraint_name LIKE '%forwarded_by_user_id%'
-            ");
-            
-            if (empty($foreignKeys)) {
-                $table->foreign('forwarded_by_user_id')->references('id')->on('users')->onDelete('set null');
-            }
-            
             $foreignKeys = DB::select("
                 SELECT constraint_name 
                 FROM information_schema.table_constraints 
@@ -109,18 +80,6 @@ return new class extends Migration
                 FROM information_schema.table_constraints 
                 WHERE table_name = 'log' 
                 AND constraint_type = 'FOREIGN KEY'
-                AND constraint_name LIKE '%forwarded_by_user_id%'
-            ");
-            
-            if (!empty($foreignKeys)) {
-                $table->dropForeign(['forwarded_by_user_id']);
-            }
-            
-            $foreignKeys = DB::select("
-                SELECT constraint_name 
-                FROM information_schema.table_constraints 
-                WHERE table_name = 'log' 
-                AND constraint_type = 'FOREIGN KEY'
                 AND constraint_name LIKE '%received_by_user_id%'
             ");
             
@@ -142,11 +101,6 @@ return new class extends Migration
             
             // Drop columns if they exist
             $columnsToDrop = [
-                'is_forwarded',
-                'forwarded_to_role', 
-                'forwarded_by_user_id',
-                'forwarded_at',
-                'forward_message',
                 'is_received',
                 'received_by_user_id',
                 'received_at',

@@ -4,6 +4,8 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Carbon\Carbon;
 
 class Log extends Model
@@ -22,13 +24,32 @@ class Log extends Model
         'line_number',
         'status',
         'resolved_at', 
-        'duration_in_seconds'
+        'duration_in_seconds',
+        // Forward problem columns
+        'is_forwarded',
+        'forwarded_to_role',
+        'forwarded_by_user_id',
+        'forwarded_at',
+        'forward_message',
+        'is_received',
+        'received_by_user_id',
+        'received_at',
+        'has_feedback_resolved',
+        'feedback_resolved_by_user_id',
+        'feedback_resolved_at',
+        'feedback_message'
     ];
     
     // Cast tipe data
     protected $casts = [
         'timestamp' => 'datetime',
         'resolved_at' => 'datetime',
+        'forwarded_at' => 'datetime',
+        'received_at' => 'datetime',
+        'feedback_resolved_at' => 'datetime',
+        'is_forwarded' => 'boolean',
+        'is_received' => 'boolean',
+        'has_feedback_resolved' => 'boolean'
     ];
 
     /**
@@ -112,5 +133,231 @@ class Log extends Model
             ->recent($seconds)
             ->orderBy('timestamp', 'desc')
             ->get();
+    }
+
+    /**
+     * Relationship dengan User yang melakukan forward
+     */
+    public function forwardedByUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'forwarded_by_user_id');
+    }
+
+    /**
+     * Relationship dengan User yang menerima problem
+     */
+    public function receivedByUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'received_by_user_id');
+    }
+
+    /**
+     * Relationship dengan User yang memberikan feedback resolved
+     */
+    public function feedbackResolvedByUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'feedback_resolved_by_user_id');
+    }
+
+    /**
+     * Relationship dengan ForwardProblemLog
+     */
+    public function forwardLogs(): HasMany
+    {
+        return $this->hasMany(ForwardProblemLog::class, 'problem_id');
+    }
+
+    /**
+     * Scope untuk problem yang sudah di-forward
+     */
+    public function scopeForwarded($query)
+    {
+        return $query->where('is_forwarded', true);
+    }
+
+    /**
+     * Scope untuk problem yang sudah diterima
+     */
+    public function scopeReceived($query)
+    {
+        return $query->where('is_received', true);
+    }
+
+    /**
+     * Scope untuk problem yang sudah ada feedback resolved
+     */
+    public function scopeWithFeedbackResolved($query)
+    {
+        return $query->where('has_feedback_resolved', true);
+    }
+
+    /**
+     * Scope untuk problem berdasarkan role visibility
+     */
+    public function scopeVisibleToRole($query, $userRole, $userLineNumber = null)
+    {
+        switch ($userRole) {
+            case 'admin':
+                // Admin bisa melihat semua problem
+                return $query;
+                
+            case 'leader':
+                // Leader hanya bisa melihat problem di line mereka
+                if ($userLineNumber) {
+                    return $query->where('line_number', $userLineNumber);
+                }
+                return $query;
+                
+            case 'maintenance':
+            case 'quality':
+            case 'warehouse':
+                // User department hanya bisa melihat problem yang sudah di-forward ke mereka
+                return $query->where('is_forwarded', true)
+                    ->where('forwarded_to_role', $userRole);
+                
+            default:
+                return $query->whereRaw('1 = 0'); // Tidak ada yang bisa dilihat
+        }
+    }
+
+    /**
+     * Get problem status untuk display
+     */
+    public function getProblemStatusAttribute()
+    {
+        if ($this->status === 'OFF') {
+            return 'resolved';
+        }
+        
+        if ($this->has_feedback_resolved) {
+            return 'feedback_resolved';
+        }
+        
+        if ($this->is_received) {
+            return 'received';
+        }
+        
+        if ($this->is_forwarded) {
+            return 'forwarded';
+        }
+        
+        return 'active';
+    }
+
+    /**
+     * Check apakah problem bisa di-forward oleh user
+     */
+    public function canBeForwardedBy($user)
+    {
+        if ($this->status !== 'ON') {
+            return false;
+        }
+        
+        if ($this->is_forwarded) {
+            return false;
+        }
+        
+        if ($user->role !== 'leader') {
+            return false;
+        }
+        
+        if ($user->line_number != $this->line_number) {
+            return false;
+        }
+        
+        return true;
+    }
+
+    /**
+     * Check apakah problem bisa diterima oleh user
+     */
+    public function canBeReceivedBy($user)
+    {
+        if ($this->status !== 'ON') {
+            return false;
+        }
+        
+        if (!$this->is_forwarded) {
+            return false;
+        }
+        
+        if ($this->is_received) {
+            return false;
+        }
+        
+        if ($user->role !== $this->forwarded_to_role) {
+            return false;
+        }
+        
+        return true;
+    }
+
+    /**
+     * Check apakah problem bisa di-feedback resolved oleh user
+     */
+    public function canBeFeedbackResolvedBy($user)
+    {
+        if ($this->status !== 'ON') {
+            return false;
+        }
+        
+        if (!$this->is_received) {
+            return false;
+        }
+        
+        if ($this->has_feedback_resolved) {
+            return false;
+        }
+        
+        if ($user->role !== $this->forwarded_to_role) {
+            return false;
+        }
+        
+        return true;
+    }
+
+    /**
+     * Check apakah problem bisa di-resolved final oleh user
+     */
+    public function canBeFinalResolvedBy($user)
+    {
+        if ($this->status !== 'ON') {
+            return false;
+        }
+        
+        if (!$this->has_feedback_resolved) {
+            return false;
+        }
+        
+        if ($user->role !== 'leader') {
+            return false;
+        }
+        
+        if ($user->line_number != $this->line_number) {
+            return false;
+        }
+        
+        return true;
+    }
+
+    public function canBeDirectResolvedBy($user)
+    {
+        if ($this->status !== 'ON') {
+            return false;
+        }
+        
+        if ($this->is_forwarded) {
+            return false; // Jika sudah di-forward, tidak bisa direct resolve
+        }
+        
+        if ($user->role !== 'leader') {
+            return false;
+        }
+        
+        if ($user->line_number != $this->line_number) {
+            return false;
+        }
+        
+        return true;
     }
 }
