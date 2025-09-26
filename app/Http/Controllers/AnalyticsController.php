@@ -265,6 +265,119 @@ class AnalyticsController extends Controller
     }
 
     /**
+     * Mengembalikan data detail forward problem untuk tabel
+     */
+    public function getDetailedForwardAnalyticsData(Request $request)
+    {
+        $request->validate([
+            'start_date' => 'required|date_format:Y-m-d',
+            'end_date' => 'required|date_format:Y-m-d',
+        ]);
+
+        $appTimezone = config('app.timezone');
+        $startDate = Carbon::parse($request->start_date, $appTimezone)->startOfDay()->utc();
+        $endDate = Carbon::parse($request->end_date, $appTimezone)->endOfDay()->utc();
+
+        // Ambil semua problem yang sudah resolved dalam rentang waktu
+        $resolvedProblems = Log::where('status', 'OFF')
+            ->whereNotNull('resolved_at')
+            ->where(function ($query) use ($startDate, $endDate) {
+                $query->whereBetween('timestamp', [$startDate, $endDate])
+                      ->orWhereBetween('resolved_at', [$startDate, $endDate])
+                      ->orWhereBetween('forwarded_at', [$startDate, $endDate])
+                      ->orWhereBetween('received_at', [$startDate, $endDate])
+                      ->orWhereBetween('feedback_resolved_at', [$startDate, $endDate]);
+            })
+            ->with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])
+            ->orderBy('resolved_at', 'desc')
+            ->get();
+            
+        // Jika tidak ada data dalam rentang waktu, ambil semua resolved data untuk testing
+        if ($resolvedProblems->isEmpty()) {
+            $resolvedProblems = Log::where('status', 'OFF')
+                ->whereNotNull('resolved_at')
+                ->with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])
+                ->orderBy('resolved_at', 'desc')
+                ->get();
+        }
+
+        $detailedData = [];
+
+        foreach ($resolvedProblems as $problem) {
+            $activeTime = Carbon::parse($problem->timestamp);
+            $forwardTime = $problem->forwarded_at ? Carbon::parse($problem->forwarded_at) : null;
+            $receiveTime = $problem->received_at ? Carbon::parse($problem->received_at) : null;
+            $feedbackTime = $problem->feedback_resolved_at ? Carbon::parse($problem->feedback_resolved_at) : null;
+            $finalTime = Carbon::parse($problem->resolved_at);
+
+            // Hitung durasi antar tahapan dalam menit
+            $activeToForward = ($activeTime && $forwardTime && $forwardTime->gt($activeTime)) ? round($activeTime->diffInMinutes($forwardTime), 2) : null;
+            $forwardToReceive = ($forwardTime && $receiveTime && $receiveTime->gt($forwardTime)) ? round($forwardTime->diffInMinutes($receiveTime), 2) : null;
+            $receiveToFeedback = ($receiveTime && $feedbackTime && $feedbackTime->gt($receiveTime)) ? round($receiveTime->diffInMinutes($feedbackTime), 2) : null;
+            $feedbackToFinal = ($feedbackTime && $finalTime && $finalTime->gt($feedbackTime)) ? round($feedbackTime->diffInMinutes($finalTime), 2) : null;
+            $totalDuration = ($finalTime->gt($activeTime)) ? round($activeTime->diffInMinutes($finalTime), 2) : 0;
+
+            // Tentukan flow type
+            $flowType = 'Direct Resolved';
+            if ($problem->is_forwarded && $problem->is_received && $problem->has_feedback_resolved) {
+                $flowType = 'Full Flow';
+            } elseif ($problem->is_forwarded && $problem->is_received) {
+                $flowType = 'Forwarded & Received';
+            } elseif ($problem->is_forwarded) {
+                $flowType = 'Forwarded Only';
+            }
+
+            $problemData = [
+                'problem_id' => $problem->id,
+                'machine' => $problem->tipe_mesin,
+                'problem_type' => $problem->tipe_problem,
+                'line_number' => $problem->line_number,
+                'flow_type' => $flowType,
+                'timestamps' => [
+                    'active_at' => $activeTime->format('Y-m-d H:i:s'),
+                    'forwarded_at' => $forwardTime ? $forwardTime->format('Y-m-d H:i:s') : null,
+                    'received_at' => $receiveTime ? $receiveTime->format('Y-m-d H:i:s') : null,
+                    'feedback_resolved_at' => $feedbackTime ? $feedbackTime->format('Y-m-d H:i:s') : null,
+                    'final_resolved_at' => $finalTime->format('Y-m-d H:i:s'),
+                ],
+                'durations_minutes' => [
+                    'active_to_forward' => $activeToForward,
+                    'forward_to_receive' => $forwardToReceive,
+                    'receive_to_feedback' => $receiveToFeedback,
+                    'feedback_to_final' => $feedbackToFinal,
+                    'total_duration' => $totalDuration,
+                ],
+                'durations_formatted' => [
+                    'active_to_forward' => $activeToForward ? $activeToForward . ' menit' : '-',
+                    'forward_to_receive' => $forwardToReceive ? $forwardToReceive . ' menit' : '-',
+                    'receive_to_feedback' => $receiveToFeedback ? $receiveToFeedback . ' menit' : '-',
+                    'feedback_to_final' => $feedbackToFinal ? $feedbackToFinal . ' menit' : '-',
+                    'total_duration' => $totalDuration . ' menit',
+                ],
+                'users' => [
+                    'forwarded_by' => $problem->forwardedByUser ? $problem->forwardedByUser->name : null,
+                    'received_by' => $problem->receivedByUser ? $problem->receivedByUser->name : null,
+                    'feedback_by' => $problem->feedbackResolvedByUser ? $problem->feedbackResolvedByUser->name : null,
+                ],
+                'messages' => [
+                    'forward_message' => $problem->forward_message,
+                    'feedback_message' => $problem->feedback_message,
+                ]
+            ];
+
+            $detailedData[] = $problemData;
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'problems' => $detailedData,
+                'count' => count($detailedData)
+            ]
+        ]);
+    }
+
+    /**
      * Format durasi dalam detik menjadi format yang lebih readable
      */
     private function formatDuration($seconds)

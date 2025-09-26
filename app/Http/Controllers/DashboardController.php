@@ -273,8 +273,17 @@ class DashboardController extends Controller
                 }
             } catch (\Exception $e) {
                 // Continue without user info if token validation fails
+                \Log::warning('Token validation failed in getStatusApi: ' . $e->getMessage());
             }
         }
+        
+        // Log request for debugging
+        \Log::info('Dashboard status API called', [
+            'has_token' => !empty($token),
+            'user_role' => $userRole,
+            'user_line' => $userLineNumber,
+            'ip' => $request->ip()
+        ]);
 
         $machineStatusesGroupedByLine = $this->getMachineStatuses($request); 
         $activeProblems = $this->getActiveProblems($request, $userRole, $userLineNumber);

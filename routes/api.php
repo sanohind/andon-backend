@@ -20,6 +20,7 @@ Route::prefix('dashboard')->group(function () {
     Route::get('/stats', [DashboardController::class, 'getDashboardStats']);
     Route::get('/analytics', [AnalyticsController::class, 'getAnalyticsData']);
     Route::get('/analytics/duration', [AnalyticsController::class, 'getProblemDurationAnalytics']);
+    Route::get('/analytics/detailed-forward', [AnalyticsController::class, 'getDetailedForwardAnalyticsData']);
     Route::get('/plc-status', [DashboardController::class, 'getPlcStatus']);
     
     // Forward Problem Routes
