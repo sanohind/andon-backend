@@ -31,7 +31,7 @@ class AuthController extends Controller
             // Cari user berdasarkan username
             $user = DB::table('users')
                 ->where('username', $request->username)
-                ->where('active', 1)
+                ->where('active', true)
                 ->first();
 
             if (!$user) {
@@ -202,7 +202,7 @@ class AuthController extends Controller
             $session = DB::table('user_sessions')
                 ->join('users', 'user_sessions.user_id', '=', 'users.id')
                 ->where('user_sessions.token', $token)
-                ->where('users.active', 1)
+                ->where('users.active', true)
                 ->where('user_sessions.expires_at', '>', Carbon::now())
                 ->select(
                     'users.id',
