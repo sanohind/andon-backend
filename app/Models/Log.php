@@ -40,16 +40,25 @@ class Log extends Model
         'feedback_message'
     ];
     
-    // Cast tipe data
+    // Cast tipe data dengan timezone Asia/Jakarta
     protected $casts = [
-        'timestamp' => 'datetime',
-        'resolved_at' => 'datetime',
-        'forwarded_at' => 'datetime',
-        'received_at' => 'datetime',
-        'feedback_resolved_at' => 'datetime',
+        'timestamp' => 'datetime:Y-m-d H:i:s',
+        'resolved_at' => 'datetime:Y-m-d H:i:s',
+        'forwarded_at' => 'datetime:Y-m-d H:i:s',
+        'received_at' => 'datetime:Y-m-d H:i:s',
+        'feedback_resolved_at' => 'datetime:Y-m-d H:i:s',
         'is_forwarded' => 'boolean',
         'is_received' => 'boolean',
         'has_feedback_resolved' => 'boolean'
+    ];
+    
+    // Set timezone untuk semua kolom datetime
+    protected $dates = [
+        'timestamp',
+        'resolved_at',
+        'forwarded_at',
+        'received_at',
+        'feedback_resolved_at'
     ];
 
     /**
@@ -77,11 +86,42 @@ class Log extends Model
     }
 
     /**
+     * Boot method untuk set timezone
+     */
+    protected static function boot()
+    {
+        parent::boot();
+        
+        // Set timezone untuk semua operasi datetime
+        static::creating(function ($model) {
+            $model->setTimezoneForDates();
+        });
+        
+        static::updating(function ($model) {
+            $model->setTimezoneForDates();
+        });
+    }
+    
+    /**
+     * Set timezone untuk semua kolom datetime
+     */
+    protected function setTimezoneForDates()
+    {
+        $dateColumns = ['timestamp', 'resolved_at', 'forwarded_at', 'received_at', 'feedback_resolved_at'];
+        
+        foreach ($dateColumns as $column) {
+            if ($this->isDirty($column) && $this->$column) {
+                $this->$column = Carbon::parse($this->$column, 'Asia/Jakarta');
+            }
+        }
+    }
+
+    /**
      * Get formatted timestamp
      */
     public function getFormattedTimestampAttribute()
     {
-        return Carbon::parse($this->timestamp)->format('d/m/Y H:i:s');
+        return Carbon::parse($this->timestamp, 'Asia/Jakarta')->format('d/m/Y H:i:s');
     }
 
     /**
@@ -89,7 +129,8 @@ class Log extends Model
      */
     public function getDurationAttribute()
     {
-    return Carbon::createFromFormat('Y-m-d H:i:s', $this->timestamp, 'UTC')->diffForHumans();
+        // Parse timestamp dengan timezone Asia/Jakarta
+        return Carbon::parse($this->timestamp, 'Asia/Jakarta')->diffForHumans();
     }
 
     /**

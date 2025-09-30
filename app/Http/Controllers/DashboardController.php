@@ -83,7 +83,7 @@ class DashboardController extends Controller
                 'color' => $activeProblem ? 'red' : 'green',
                 'problem_type' => $activeProblem ? $activeProblem->tipe_problem : null,
                 'timestamp' => $activeProblem ? $activeProblem->timestamp : null,
-                'last_check' => Carbon::now()->format('Y-m-d H:i:s'),
+                'last_check' => Carbon::now('Asia/Jakarta')->format('Y-m-d H:i:s'),
                 'quantity' => $latestProduction ? $latestProduction->quantity : 0,
                 'id' => $table->id
             ];
@@ -177,7 +177,7 @@ class DashboardController extends Controller
                 'color' => $machineStatus === 'problem' ? 'red' : 'green',
                 'problem_type' => $problemType,
                 'timestamp' => $timestamp,
-                'last_check' => Carbon::now()->format('Y-m-d H:i:s'),
+                'last_check' => Carbon::now('Asia/Jakarta')->format('Y-m-d H:i:s'),
                 'quantity' => $latestProduction ? $latestProduction->quantity : 0,
                 'id' => $table->id
             ];
@@ -207,7 +207,8 @@ class DashboardController extends Controller
         // }
 
         return $query->get()->map(function($problem) {
-            $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, 'UTC');
+            // PERBAIKAN: Gunakan timezone Asia/Jakarta untuk konsistensi
+            $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, 'Asia/Jakarta');
             
             // Calculate problem status based on current state
             $problemStatus = 'active';
@@ -263,7 +264,7 @@ class DashboardController extends Controller
                     ->join('users', 'user_sessions.user_id', '=', 'users.id')
                     ->where('user_sessions.token', str_replace('Bearer ', '', $token))
                     ->where('users.active', 1)
-                    ->where('user_sessions.expires_at', '>', Carbon::now())
+                    ->where('user_sessions.expires_at', '>', Carbon::now('Asia/Jakarta'))
                     ->select('users.role', 'users.line_number')
                     ->first();
 
@@ -297,7 +298,7 @@ class DashboardController extends Controller
                 'new_problems' => $newProblems,
                 'user_role' => $userRole,
                 'user_line_number' => $userLineNumber,
-                'timestamp' => Carbon::now()->format('Y-m-d H:i:s')
+                'timestamp' => Carbon::now('Asia/Jakarta')->format('Y-m-d H:i:s')
             ]
         ]);
     }
@@ -307,7 +308,7 @@ class DashboardController extends Controller
      */
     public function getNewProblems(Request $request = null, $userRole = null, $userLineNumber = null)
     {
-        $tenSecondsAgo = Carbon::now()->subSeconds(10);
+        $tenSecondsAgo = Carbon::now('Asia/Jakarta')->subSeconds(10);
         
         $query = Log::active()
             ->where('timestamp', '>=', $tenSecondsAgo)
@@ -356,7 +357,8 @@ class DashboardController extends Controller
             ], 404);
         }
         
-        $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, 'UTC');
+        // PERBAIKAN: Gunakan timezone Asia/Jakarta untuk konsistensi
+        $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, 'Asia/Jakarta');
         
         // Calculate problem status based on current state
         $problemStatus = 'active';
@@ -464,7 +466,7 @@ class DashboardController extends Controller
         if ($request->input('status') === 'OFF') {
             
             $problem->status = 'OFF';
-            $problem->resolved_at = now(); // Mengambil waktu saat ini (WIB)
+            $problem->resolved_at = Carbon::now('Asia/Jakarta'); // Mengambil waktu saat ini dengan timezone Asia/Jakarta
 
             // =====================================================================
             // == PERHITUNGAN DURASI FINAL YANG AKURAT ==
@@ -473,11 +475,11 @@ class DashboardController extends Controller
             // 1. Ambil timestamp mentah dari DB untuk menghindari salah interpretasi dari Laravel
             $timestampString = $problem->getRawOriginal('timestamp');
 
-            // 2. Buat objek waktu dari string mentah, dan paksakan interpretasinya sebagai UTC
-            $startTime = \Carbon\Carbon::createFromFormat('Y-m-d H:i:s', $timestampString, 'UTC');
+            // 2. Buat objek waktu dari string mentah dengan timezone Asia/Jakarta
+            $startTime = \Carbon\Carbon::createFromFormat('Y-m-d H:i:s', $timestampString, 'Asia/Jakarta');
             
-            // 3. Hitung selisihnya. Carbon akan menangani konversi antar timezone secara otomatis.
-            $problem->duration_in_seconds = abs($problem->resolved_at->diffInSeconds($startTime));
+            // 3. Hitung selisihnya dengan timezone yang sama (convert ke integer)
+            $problem->duration_in_seconds = (int) abs($problem->resolved_at->diffInSeconds($startTime));
             
             // Simpan semua perubahan ke database
             $problem->save();
@@ -663,7 +665,7 @@ class DashboardController extends Controller
             'is_forwarded' => true,
             'forwarded_to_role' => $targetRole,
             'forwarded_by_user_id' => $session->id,
-            'forwarded_at' => now(),
+            'forwarded_at' => Carbon::now('Asia/Jakarta'),
             'forward_message' => $request->input('message', 'Problem telah diteruskan untuk penanganan.')
         ]);
         
@@ -675,7 +677,7 @@ class DashboardController extends Controller
             'target_role' => $targetRole,
             'forwarded_by' => $session->name,
             'forwarded_by_id' => $session->id,
-            'forwarded_at' => now(),
+            'forwarded_at' => Carbon::now('Asia/Jakarta'),
             'message' => $request->input('message', 'Problem telah diteruskan untuk penanganan.')
         ];
 
@@ -761,7 +763,7 @@ class DashboardController extends Controller
         $problem->update([
             'is_received' => true,
             'received_by_user_id' => $session->id,
-            'received_at' => now()
+            'received_at' => Carbon::now('Asia/Jakarta')
         ]);
 
         // Log receive event
@@ -785,7 +787,7 @@ class DashboardController extends Controller
             'data' => [
                 'problem_id' => $problem->id,
                 'received_by' => $session->name,
-                'received_at' => now()->format('d/m/Y H:i:s')
+                'received_at' => Carbon::now('Asia/Jakarta')->format('d/m/Y H:i:s')
             ]
         ]);
     }
@@ -850,7 +852,7 @@ class DashboardController extends Controller
         $problem->update([
             'has_feedback_resolved' => true,
             'feedback_resolved_by_user_id' => $session->id,
-            'feedback_resolved_at' => now(),
+            'feedback_resolved_at' => Carbon::now('Asia/Jakarta'),
             'feedback_message' => $request->input('message', 'Problem sudah selesai ditangani.')
         ]);
 
@@ -875,7 +877,7 @@ class DashboardController extends Controller
             'data' => [
                 'problem_id' => $problem->id,
                 'feedback_by' => $session->name,
-                'feedback_at' => now()->format('d/m/Y H:i:s'),
+                'feedback_at' => Carbon::now('Asia/Jakarta')->format('d/m/Y H:i:s'),
                 'message' => $request->input('message', 'Problem sudah selesai ditangani.')
             ]
         ]);
@@ -961,12 +963,12 @@ class DashboardController extends Controller
 
         // Update problem status ke OFF
         $problem->status = 'OFF';
-        $problem->resolved_at = now();
+        $problem->resolved_at = Carbon::now('Asia/Jakarta');
 
         // Hitung durasi final yang akurat
         $timestampString = $problem->getRawOriginal('timestamp');
-        $startTime = \Carbon\Carbon::createFromFormat('Y-m-d H:i:s', $timestampString, 'UTC');
-        $problem->duration_in_seconds = abs($problem->resolved_at->diffInSeconds($startTime));
+        $startTime = \Carbon\Carbon::createFromFormat('Y-m-d H:i:s', $timestampString, 'Asia/Jakarta');
+        $problem->duration_in_seconds = (int) abs($problem->resolved_at->diffInSeconds($startTime));
 
         $problem->save();
 
@@ -996,7 +998,7 @@ class DashboardController extends Controller
             'data' => [
                 'problem_id' => $problem->id,
                 'resolved_by' => $session->name,
-                'resolved_at' => now()->format('d/m/Y H:i:s'),
+                'resolved_at' => Carbon::now('Asia/Jakarta')->format('d/m/Y H:i:s'),
                 'duration_seconds' => $problem->duration_in_seconds
             ]
         ]);
