@@ -310,12 +310,12 @@ class AnalyticsController extends Controller
             $feedbackTime = $problem->feedback_resolved_at ? Carbon::parse($problem->feedback_resolved_at) : null;
             $finalTime = Carbon::parse($problem->resolved_at);
 
-            // Hitung durasi antar tahapan dalam menit
-            $activeToForward = ($activeTime && $forwardTime && $forwardTime->gt($activeTime)) ? round($activeTime->diffInMinutes($forwardTime), 2) : null;
-            $forwardToReceive = ($forwardTime && $receiveTime && $receiveTime->gt($forwardTime)) ? round($forwardTime->diffInMinutes($receiveTime), 2) : null;
-            $receiveToFeedback = ($receiveTime && $feedbackTime && $feedbackTime->gt($receiveTime)) ? round($receiveTime->diffInMinutes($feedbackTime), 2) : null;
-            $feedbackToFinal = ($feedbackTime && $finalTime && $finalTime->gt($feedbackTime)) ? round($feedbackTime->diffInMinutes($finalTime), 2) : null;
-            $totalDuration = ($finalTime->gt($activeTime)) ? round($activeTime->diffInMinutes($finalTime), 2) : 0;
+            // Hitung durasi antar tahapan dalam menit (dibulatkan ke menit terdekat)
+            $activeToForward = ($activeTime && $forwardTime && $forwardTime->gt($activeTime)) ? round($activeTime->diffInMinutes($forwardTime)) : null;
+            $forwardToReceive = ($forwardTime && $receiveTime && $receiveTime->gt($forwardTime)) ? round($forwardTime->diffInMinutes($receiveTime)) : null;
+            $receiveToFeedback = ($receiveTime && $feedbackTime && $feedbackTime->gt($receiveTime)) ? round($receiveTime->diffInMinutes($feedbackTime)) : null;
+            $feedbackToFinal = ($feedbackTime && $finalTime && $finalTime->gt($feedbackTime)) ? round($feedbackTime->diffInMinutes($finalTime)) : null;
+            $totalDuration = ($finalTime->gt($activeTime)) ? round($activeTime->diffInMinutes($finalTime)) : 0;
 
             // Tentukan flow type
             $flowType = 'Direct Resolved';
@@ -348,11 +348,11 @@ class AnalyticsController extends Controller
                     'total_duration' => $totalDuration,
                 ],
                 'durations_formatted' => [
-                    'active_to_forward' => $activeToForward ? $activeToForward . ' menit' : '-',
-                    'forward_to_receive' => $forwardToReceive ? $forwardToReceive . ' menit' : '-',
-                    'receive_to_feedback' => $receiveToFeedback ? $receiveToFeedback . ' menit' : '-',
-                    'feedback_to_final' => $feedbackToFinal ? $feedbackToFinal . ' menit' : '-',
-                    'total_duration' => $totalDuration . ' menit',
+                    'active_to_forward' => $activeToForward ? $this->formatDurationMinutes($activeToForward) : '-',
+                    'forward_to_receive' => $forwardToReceive ? $this->formatDurationMinutes($forwardToReceive) : '-',
+                    'receive_to_feedback' => $receiveToFeedback ? $this->formatDurationMinutes($receiveToFeedback) : '-',
+                    'feedback_to_final' => $feedbackToFinal ? $this->formatDurationMinutes($feedbackToFinal) : '-',
+                    'total_duration' => $this->formatDurationMinutes($totalDuration),
                 ],
                 'users' => [
                     'forwarded_by' => $problem->forwardedByUser ? $problem->forwardedByUser->name : null,
@@ -393,6 +393,26 @@ class AnalyticsController extends Controller
             $minutes = floor(($seconds % 3600) / 60);
             $remainingSeconds = $seconds % 60;
             return $hours . ' jam ' . $minutes . ' menit ' . $remainingSeconds . ' detik';
+        }
+    }
+
+    /**
+     * Format durasi dalam menit menjadi format yang lebih readable
+     */
+    private function formatDurationMinutes($minutes)
+    {
+        if ($minutes < 1) {
+            return '< 1 menit';
+        } elseif ($minutes < 60) {
+            return $minutes . ' menit';
+        } else {
+            $hours = floor($minutes / 60);
+            $remainingMinutes = $minutes % 60;
+            if ($remainingMinutes == 0) {
+                return $hours . ' jam';
+            } else {
+                return $hours . ' jam ' . $remainingMinutes . ' menit';
+            }
         }
     }
 }

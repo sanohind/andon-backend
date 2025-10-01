@@ -100,6 +100,9 @@ return [
                 \PDO::ATTR_STRINGIFY_FETCHES => true,
             ],
             'timezone' => 'Asia/Jakarta',
+            'modes' => [
+                'ON_ERROR_STOP',
+            ],
         ],
 
         'sqlsrv' => [

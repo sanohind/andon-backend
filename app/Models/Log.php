@@ -47,9 +47,14 @@ class Log extends Model
         'forwarded_at' => 'datetime:Y-m-d H:i:s',
         'received_at' => 'datetime:Y-m-d H:i:s',
         'feedback_resolved_at' => 'datetime:Y-m-d H:i:s',
-        'is_forwarded' => 'boolean',
-        'is_received' => 'boolean',
-        'has_feedback_resolved' => 'boolean'
+        'is_forwarded' => 'integer',
+        'is_received' => 'integer',
+        'has_feedback_resolved' => 'integer',
+        'line_number' => 'integer',
+        'duration_in_seconds' => 'integer',
+        'forwarded_by_user_id' => 'integer',
+        'received_by_user_id' => 'integer',
+        'feedback_resolved_by_user_id' => 'integer'
     ];
     
     // Set timezone untuk semua kolom datetime
@@ -111,7 +116,7 @@ class Log extends Model
         
         foreach ($dateColumns as $column) {
             if ($this->isDirty($column) && $this->$column) {
-                $this->$column = Carbon::parse($this->$column, 'Asia/Jakarta');
+                $this->$column = Carbon::parse($this->$column, config('app.timezone'));
             }
         }
     }
@@ -121,7 +126,7 @@ class Log extends Model
      */
     public function getFormattedTimestampAttribute()
     {
-        return Carbon::parse($this->timestamp, 'Asia/Jakarta')->format('d/m/Y H:i:s');
+        return Carbon::parse($this->timestamp, config('app.timezone'))->format('d/m/Y H:i:s');
     }
 
     /**
@@ -129,8 +134,8 @@ class Log extends Model
      */
     public function getDurationAttribute()
     {
-        // Parse timestamp dengan timezone Asia/Jakarta
-        return Carbon::parse($this->timestamp, 'Asia/Jakarta')->diffForHumans();
+        // Parse timestamp dengan timezone dari config
+        return Carbon::parse($this->timestamp, config('app.timezone'))->diffForHumans();
     }
 
     /**
