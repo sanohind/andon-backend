@@ -5,6 +5,7 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\InspectionTableController;
+use App\Http\Controllers\TicketingProblemController;
 
 // Auth Routes - TANPA PREFIX AUTH
 Route::post('/login', [AuthController::class, 'login']);
@@ -21,6 +22,7 @@ Route::prefix('dashboard')->group(function () {
     Route::get('/analytics', [AnalyticsController::class, 'getAnalyticsData']);
     Route::get('/analytics/duration', [AnalyticsController::class, 'getProblemDurationAnalytics']);
     Route::get('/analytics/detailed-forward', [AnalyticsController::class, 'getDetailedForwardAnalyticsData']);
+    Route::get('/analytics/ticketing', [AnalyticsController::class, 'getTicketingAnalyticsData']);
     Route::get('/plc-status', [DashboardController::class, 'getPlcStatus']);
     
     // Forward Problem Routes
@@ -30,6 +32,13 @@ Route::prefix('dashboard')->group(function () {
     Route::post('/problem/{id}/final-resolved', [DashboardController::class, 'finalResolved']);
     Route::get('/forward-logs', [DashboardController::class, 'getForwardLogs']);
     Route::get('/forward-logs/{problemId}', [DashboardController::class, 'getForwardLogs']);
+    
+    // Ticketing Problem Routes
+    Route::get('/ticketing/data', [TicketingProblemController::class, 'getTicketingData']);
+    Route::post('/ticketing', [TicketingProblemController::class, 'createTicketing']);
+    Route::put('/ticketing/{id}', [TicketingProblemController::class, 'updateTicketing']);
+    Route::get('/ticketing/problem/{problemId}', [TicketingProblemController::class, 'getTicketingByProblem']);
+    Route::get('/ticketing/technicians', [TicketingProblemController::class, 'getTechnicians']);
 });
 
 Route::middleware('auth:sanctum')->group(function () {

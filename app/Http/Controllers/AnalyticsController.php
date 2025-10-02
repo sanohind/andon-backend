@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\Log;
+use App\Models\TicketingProblem;
 use Carbon\Carbon;
 
 class AnalyticsController extends Controller
@@ -414,5 +415,73 @@ class AnalyticsController extends Controller
                 return $hours . ' jam ' . $remainingMinutes . ' menit';
             }
         }
+    }
+
+    /**
+     * Get ticketing data untuk analytics
+     */
+    public function getTicketingAnalyticsData(Request $request)
+    {
+        $request->validate([
+            'start_date' => 'required|date_format:Y-m-d',
+            'end_date' => 'required|date_format:Y-m-d',
+        ]);
+
+        $appTimezone = config('app.timezone');
+        $startDate = Carbon::parse($request->start_date, $appTimezone)->startOfDay()->utc();
+        $endDate = Carbon::parse($request->end_date, $appTimezone)->endOfDay()->utc();
+
+        $ticketingData = TicketingProblem::with(['problem', 'createdByUser', 'updatedByUser'])
+            ->whereBetween('created_at', [$startDate, $endDate])
+            ->orderBy('created_at', 'desc')
+            ->get()
+            ->map(function($ticketing) {
+                return [
+                    'id' => $ticketing->id,
+                    'problem_id' => $ticketing->problem_id,
+                    'machine' => $ticketing->problem ? $ticketing->problem->tipe_mesin : 'Unknown',
+                    'problem_type' => $ticketing->problem ? $ticketing->problem->tipe_problem : 'Unknown',
+                    'line_number' => $ticketing->problem ? $ticketing->problem->line_number : 'Unknown',
+                    'pic_technician' => $ticketing->pic_technician,
+                    'diagnosis' => $ticketing->diagnosis,
+                    'result_repair' => $ticketing->result_repair,
+                    'status' => $ticketing->status,
+                    'status_label' => $ticketing->status_label,
+                    'status_badge_class' => $ticketing->status_badge_class,
+                    'timestamps' => [
+                        'problem_received_at' => $ticketing->formatted_problem_received_at,
+                        'diagnosis_started_at' => $ticketing->formatted_diagnosis_started_at,
+                        'repair_started_at' => $ticketing->formatted_repair_started_at,
+                        'repair_completed_at' => $ticketing->formatted_repair_completed_at,
+                        'created_at' => $ticketing->created_at->format('d/m/Y H:i:s'),
+                        'updated_at' => $ticketing->updated_at->format('d/m/Y H:i:s'),
+                    ],
+                    'durations' => [
+                        'downtime' => $ticketing->formatted_downtime,
+                        'mttr' => $ticketing->formatted_mttr,
+                        'mttd' => $ticketing->formatted_mttd,
+                        'mtbf' => $ticketing->formatted_mtbf,
+                    ],
+                    'durations_seconds' => [
+                        'downtime_seconds' => $ticketing->downtime_seconds,
+                        'mttr_seconds' => $ticketing->mttr_seconds,
+                        'mttd_seconds' => $ticketing->mttd_seconds,
+                        'mtbf_seconds' => $ticketing->mtbf_seconds,
+                    ],
+                    'users' => [
+                        'created_by' => $ticketing->createdByUser ? $ticketing->createdByUser->name : 'Unknown',
+                        'updated_by' => $ticketing->updatedByUser ? $ticketing->updatedByUser->name : null,
+                    ],
+                    'metadata' => $ticketing->metadata
+                ];
+            });
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'ticketing' => $ticketingData,
+                'count' => $ticketingData->count()
+            ]
+        ]);
     }
 }

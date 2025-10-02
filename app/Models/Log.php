@@ -214,6 +214,14 @@ class Log extends Model
     }
 
     /**
+     * Relationship dengan TicketingProblem
+     */
+    public function ticketingProblem(): HasOne
+    {
+        return $this->hasOne(TicketingProblem::class, 'problem_id');
+    }
+
+    /**
      * Scope untuk problem yang sudah di-forward
      */
     public function scopeForwarded($query)
