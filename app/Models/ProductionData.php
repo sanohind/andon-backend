@@ -31,6 +31,7 @@ class ProductionData extends Model
     protected $fillable = [
         'timestamp',
         'machine_name',
+        'line_name',
         'quantity',
     ];
 

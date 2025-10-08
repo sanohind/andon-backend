@@ -332,7 +332,7 @@ class AnalyticsController extends Controller
                 'problem_id' => $problem->id,
                 'machine' => $problem->tipe_mesin,
                 'problem_type' => $problem->tipe_problem,
-                'line_number' => $problem->line_number,
+                'line_name' => $problem->line_name,
                 'flow_type' => $flowType,
                 'timestamps' => [
                     'active_at' => $activeTime->format('Y-m-d H:i:s'),
@@ -441,7 +441,7 @@ class AnalyticsController extends Controller
                     'problem_id' => $ticketing->problem_id,
                     'machine' => $ticketing->problem ? $ticketing->problem->tipe_mesin : 'Unknown',
                     'problem_type' => $ticketing->problem ? $ticketing->problem->tipe_problem : 'Unknown',
-                    'line_number' => $ticketing->problem ? $ticketing->problem->line_number : 'Unknown',
+                    'line_name' => $ticketing->problem ? $ticketing->problem->line_name : 'Unknown',
                     'pic_technician' => $ticketing->pic_technician,
                     'diagnosis' => $ticketing->diagnosis,
                     'result_repair' => $ticketing->result_repair,

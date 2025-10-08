@@ -26,6 +26,15 @@ class UsersSeeder extends Seeder
                 'updated_at' => Carbon::now()
             ],
             [
+                'username' => 'manager',
+                'name' => 'Manager',
+                'password' => Hash::make('blackbox'), // GANTI PASSWORD INI!
+                'role' => 'manager',
+                'active' => true,
+                'created_at' => Carbon::now(),
+                'updated_at' => Carbon::now()
+            ],
+            [
                 'username' => 'leader',
                 'name' => 'Leader',
                 'password' => Hash::make('blackbox'), // GANTI PASSWORD INI!
@@ -53,10 +62,10 @@ class UsersSeeder extends Seeder
                 'updated_at' => Carbon::now()
             ],
             [
-                'username' => 'warehouse',
-                'name' => 'Warehouse',
+                'username' => 'engineering',
+                'name' => 'Engineering',
                 'password' => Hash::make('blackbox'), // GANTI PASSWORD INI!
-                'role' => 'warehouse',
+                'role' => 'engineering',
                 'active' => true,
                 'created_at' => Carbon::now(),
                 'updated_at' => Carbon::now()

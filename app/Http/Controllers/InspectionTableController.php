@@ -16,12 +16,12 @@ class InspectionTableController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'line_number' => 'required|integer|min:1'
+            'line_name' => 'required|string|max:50'
         ]);
 
         // Validasi unik secara manual
         $exists = InspectionTable::where('name', $validated['name'])
-                                ->where('line_number', $validated['line_number'])
+                                ->where('line_name', $validated['line_name'])
                                 ->exists();
 
         if ($exists) {
@@ -35,12 +35,12 @@ class InspectionTableController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'line_number' => 'required|integer|min:1'
+            'line_name' => 'required|string|max:50'
         ]);
 
         // Validasi unik secara manual
         $exists = InspectionTable::where('name', $validated['name'])
-                                ->where('line_number', $validated['line_number'])
+                                ->where('line_name', $validated['line_name'])
                                 ->where('id', '!=', $inspectionTable->id)
                                 ->exists();
 

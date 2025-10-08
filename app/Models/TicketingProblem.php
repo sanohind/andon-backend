@@ -290,13 +290,13 @@ class TicketingProblem extends Model
      */
     public function canBeUpdatedBy($user)
     {
-        // Hanya user maintenance yang bisa update ticketing
-        if ($user->role !== 'maintenance') {
+        // User maintenance, quality, dan engineering bisa update ticketing
+        if (!in_array($user->role, ['maintenance', 'quality', 'engineering'])) {
             return false;
         }
         
         // Hanya creator atau user yang sama role yang bisa update
-        return $this->created_by_user_id == $user->id || $user->role === 'maintenance';
+        return $this->created_by_user_id == $user->id || in_array($user->role, ['maintenance', 'quality', 'engineering']);
     }
 
     /**

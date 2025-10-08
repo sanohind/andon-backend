@@ -37,48 +37,48 @@ class DashboardController extends Controller
     public function getMachineStatuses(Request $request)
     {
         // Ambil SEMUA meja, karena filter akan dilakukan di frontend Node.js/EJS
-        $allInspectionTables = InspectionTable::orderBy('line_number')->orderBy('name')->get();
+        $allInspectionTables = InspectionTable::orderBy('line_name')->orderBy('name')->get();
         
         // Siapkan struktur data yang dikelompokkan per line
         $groupedStatuses = [];
 
-        // Ambil semua data log problem dengan kombinasi tipe_mesin DAN line_number
+        // Ambil semua data log problem dengan kombinasi tipe_mesin DAN line_name
         $activeProblems = DB::table('log')
             ->where('status', 'ON')
             ->get()
             ->keyBy(function($item) {
-                // PERBAIKAN: Gunakan kombinasi tipe_mesin dan line_number sebagai key
-                return $item->tipe_mesin . '_line_' . $item->line_number;
+                // PERBAIKAN: Gunakan kombinasi tipe_mesin dan line_name sebagai key
+                return $item->tipe_mesin . '_line_' . $item->line_name;
             });
 
-        // Ambil data produksi terbaru dengan kombinasi machine_name dan line_number
+        // Ambil data produksi terbaru dengan kombinasi machine_name dan line_name
         $machineNames = $allInspectionTables->pluck('name')->toArray();
         $latestProductions = ProductionData::whereIn('machine_name', $machineNames)
             ->orderBy('timestamp', 'desc')
             ->get()
             ->unique(function($item) {
-                // PERBAIKAN: Gunakan kombinasi machine_name dan line_number untuk uniqueness
-                return $item->machine_name . '_line_' . ($item->line_number ?? 'default');
+                // PERBAIKAN: Gunakan kombinasi machine_name dan line_name untuk uniqueness
+                return $item->machine_name . '_line_' . ($item->line_name ?? 'default');
             })
             ->keyBy(function($item) {
-                return $item->machine_name . '_line_' . ($item->line_number ?? 'default');
+                return $item->machine_name . '_line_' . ($item->line_name ?? 'default');
             });
 
         foreach ($allInspectionTables as $table) {
             $machineName = $table->name;
-            $lineNumber = $table->line_number;
+            $lineName = $table->line_name;
 
             // PERBAIKAN: Cari active problem berdasarkan kombinasi nama mesin DAN line number
-            $problemKey = $machineName . '_line_' . $lineNumber;
+            $problemKey = $machineName . '_line_' . $lineName;
             $activeProblem = $activeProblems->get($problemKey);
 
             // PERBAIKAN: Cari production data berdasarkan kombinasi nama mesin DAN line number
-            $productionKey = $machineName . '_line_' . $lineNumber;
+            $productionKey = $machineName . '_line_' . $lineName;
             $latestProduction = $latestProductions->get($productionKey);
 
             $statusData = [
                 'name' => $machineName,
-                'line_number' => $lineNumber, // TAMBAHAN: Sertakan line_number dalam response
+                'line_name' => $lineName, // TAMBAHAN: Sertakan line_name dalam response
                 'status' => $activeProblem ? 'problem' : 'normal',
                 'color' => $activeProblem ? 'red' : 'green',
                 'problem_type' => $activeProblem ? $activeProblem->tipe_problem : null,
@@ -88,11 +88,11 @@ class DashboardController extends Controller
                 'id' => $table->id
             ];
 
-            // Kelompokkan berdasarkan line_number
-            if (!isset($groupedStatuses[$lineNumber])) {
-                $groupedStatuses[$lineNumber] = [];
+            // Kelompokkan berdasarkan line_name
+            if (!isset($groupedStatuses[$lineName])) {
+                $groupedStatuses[$lineName] = [];
             }
-            $groupedStatuses[$lineNumber][] = $statusData;
+            $groupedStatuses[$lineName][] = $statusData;
         }
         
         return $groupedStatuses;
@@ -101,46 +101,46 @@ class DashboardController extends Controller
     /**
      * Get status semua mesin dengan role-based filtering
      */
-    public function getMachineStatusesWithRoleFilter(Request $request, $userRole = null, $userLineNumber = null)
+    public function getMachineStatusesWithRoleFilter(Request $request, $userRole = null, $userLineName = null)
     {
         // Ambil SEMUA meja, karena filter akan dilakukan di frontend Node.js/EJS
-        $allInspectionTables = InspectionTable::orderBy('line_number')->orderBy('name')->get();
+        $allInspectionTables = InspectionTable::orderBy('line_name')->orderBy('name')->get();
         
         // Siapkan struktur data yang dikelompokkan per line
         $groupedStatuses = [];
 
-        // Ambil semua data log problem dengan kombinasi tipe_mesin DAN line_number
+        // Ambil semua data log problem dengan kombinasi tipe_mesin DAN line_name
         $activeProblems = DB::table('log')
             ->where('status', 'ON')
             ->get()
             ->keyBy(function($item) {
-                // PERBAIKAN: Gunakan kombinasi tipe_mesin dan line_number sebagai key
-                return $item->tipe_mesin . '_line_' . $item->line_number;
+                // PERBAIKAN: Gunakan kombinasi tipe_mesin dan line_name sebagai key
+                return $item->tipe_mesin . '_line_' . $item->line_name;
             });
 
-        // Ambil data produksi terbaru dengan kombinasi machine_name dan line_number
+        // Ambil data produksi terbaru dengan kombinasi machine_name dan line_name
         $machineNames = $allInspectionTables->pluck('name')->toArray();
         $latestProductions = ProductionData::whereIn('machine_name', $machineNames)
             ->orderBy('timestamp', 'desc')
             ->get()
             ->unique(function($item) {
-                // PERBAIKAN: Gunakan kombinasi machine_name dan line_number untuk uniqueness
-                return $item->machine_name . '_line_' . ($item->line_number ?? 'default');
+                // PERBAIKAN: Gunakan kombinasi machine_name dan line_name untuk uniqueness
+                return $item->machine_name . '_line_' . ($item->line_name ?? 'default');
             })
             ->keyBy(function($item) {
-                return $item->machine_name . '_line_' . ($item->line_number ?? 'default');
+                return $item->machine_name . '_line_' . ($item->line_name ?? 'default');
             });
 
         foreach ($allInspectionTables as $table) {
             $machineName = $table->name;
-            $lineNumber = $table->line_number;
+            $lineName = $table->line_name;
 
             // PERBAIKAN: Cari active problem berdasarkan kombinasi nama mesin DAN line number
-            $problemKey = $machineName . '_line_' . $lineNumber;
+            $problemKey = $machineName . '_line_' . $lineName;
             $activeProblem = $activeProblems->get($problemKey);
 
             // PERBAIKAN: Cari production data berdasarkan kombinasi nama mesin DAN line number
-            $productionKey = $machineName . '_line_' . $lineNumber;
+            $productionKey = $machineName . '_line_' . $lineName;
             $latestProduction = $latestProductions->get($productionKey);
 
             // Tentukan status berdasarkan role user
@@ -152,14 +152,14 @@ class DashboardController extends Controller
                 // Cek apakah problem ini boleh ditampilkan untuk user role ini
                 $shouldShowProblem = true;
 
-                if (in_array($userRole, ['maintenance', 'quality', 'warehouse'])) {
+                if (in_array($userRole, ['maintenance', 'quality', 'engineering'])) {
                     // Department users hanya melihat problem jika sudah di-forward ke mereka
                     $shouldShowProblem = $activeProblem->is_forwarded && $activeProblem->forwarded_to_role === $userRole;
                 } elseif ($userRole === 'leader') {
                     // Leader hanya melihat problem dari line mereka
-                    $shouldShowProblem = $activeProblem->line_number == $userLineNumber;
-                } elseif ($userRole === 'admin') {
-                    // Admin melihat semua problem
+                    $shouldShowProblem = $activeProblem->line_name == $userLineName;
+                } elseif (in_array($userRole, ['admin', 'manager'])) {
+                    // Admin dan Manager melihat semua problem
                     $shouldShowProblem = true;
                 }
 
@@ -172,7 +172,7 @@ class DashboardController extends Controller
 
             $statusData = [
                 'name' => $machineName,
-                'line_number' => $lineNumber,
+                'line_name' => $lineName,
                 'status' => $machineStatus,
                 'color' => $machineStatus === 'problem' ? 'red' : 'green',
                 'problem_type' => $problemType,
@@ -182,11 +182,11 @@ class DashboardController extends Controller
                 'id' => $table->id
             ];
 
-            // Kelompokkan berdasarkan line_number
-            if (!isset($groupedStatuses[$lineNumber])) {
-                $groupedStatuses[$lineNumber] = [];
+            // Kelompokkan berdasarkan line_name
+            if (!isset($groupedStatuses[$lineName])) {
+                $groupedStatuses[$lineName] = [];
             }
-            $groupedStatuses[$lineNumber][] = $statusData;
+            $groupedStatuses[$lineName][] = $statusData;
         }
         
         return $groupedStatuses;
@@ -195,7 +195,7 @@ class DashboardController extends Controller
     /**
      * Get daftar problem yang sedang aktif dengan role-based visibility
      */
-    public function getActiveProblems(Request $request = null, $userRole = null, $userLineNumber = null)
+    public function getActiveProblems(Request $request = null, $userRole = null, $userLineName = null)
     {
         $query = Log::active()
             ->with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])
@@ -203,7 +203,7 @@ class DashboardController extends Controller
 
         // PERBAIKAN: Tidak melakukan filtering di backend karena filtering dilakukan di Node.js
         // if ($userRole) {
-        //     $query = $query->visibleToRole($userRole, $userLineNumber);
+        //     $query = $query->visibleToRole($userRole, $userLineName);
         // }
 
         return $query->get()->map(function($problem) {
@@ -226,7 +226,7 @@ class DashboardController extends Controller
                 'id' => $problem->id,
                 'machine' => $problem->tipe_mesin,
                 'problem_type' => $problem->tipe_problem,
-                'line_number' => $problem->line_number,
+                'line_name' => $problem->line_name,
                 'timestamp' => Carbon::parse($problem->timestamp)->format('d/m/Y H:i:s'),
                 'duration' => $problemTimestamp->diffForHumans(),
                 'severity' => $this->getProblemSeverity($problem->tipe_problem),
@@ -255,7 +255,7 @@ class DashboardController extends Controller
     {
         // Get user info from token if available
         $userRole = null;
-        $userLineNumber = null;
+        $userLineName = null;
         
         $token = $request->bearerToken() ?? $request->header('Authorization');
         if ($token) {
@@ -265,12 +265,12 @@ class DashboardController extends Controller
                     ->where('user_sessions.token', str_replace('Bearer ', '', $token))
                     ->where('users.active', 1)
                     ->where('user_sessions.expires_at', '>', Carbon::now(config('app.timezone')))
-                    ->select('users.role', 'users.line_number')
+                    ->select('users.role', 'users.line_name')
                     ->first();
 
                 if ($session) {
                     $userRole = $session->role;
-                    $userLineNumber = $session->line_number;
+                    $userLineName = $session->line_name;
                 }
             } catch (\Exception $e) {
                 // Continue without user info if token validation fails
@@ -282,13 +282,13 @@ class DashboardController extends Controller
         \Log::info('Dashboard status API called', [
             'has_token' => !empty($token),
             'user_role' => $userRole,
-            'user_line' => $userLineNumber,
+            'user_line' => $userLineName,
             'ip' => $request->ip()
         ]);
 
         $machineStatusesGroupedByLine = $this->getMachineStatuses($request); 
-        $activeProblems = $this->getActiveProblems($request, $userRole, $userLineNumber);
-        $newProblems = $this->getNewProblems($request, $userRole, $userLineNumber);
+        $activeProblems = $this->getActiveProblems($request, $userRole, $userLineName);
+        $newProblems = $this->getNewProblems($request, $userRole, $userLineName);
         
         return response()->json([
             'success' => true,
@@ -297,7 +297,7 @@ class DashboardController extends Controller
                 'active_problems' => $activeProblems,
                 'new_problems' => $newProblems,
                 'user_role' => $userRole,
-                'user_line_number' => $userLineNumber,
+                'user_line_name' => $userLineName,
                 'timestamp' => Carbon::now(config('app.timezone'))->format('Y-m-d H:i:s')
             ]
         ]);
@@ -306,7 +306,7 @@ class DashboardController extends Controller
     /**
      * Get problem baru dalam 10 detik terakhir (untuk notifikasi) dengan role-based visibility
      */
-    public function getNewProblems(Request $request = null, $userRole = null, $userLineNumber = null)
+    public function getNewProblems(Request $request = null, $userRole = null, $userLineName = null)
     {
         $tenSecondsAgo = Carbon::now(config('app.timezone'))->subSeconds(10);
         
@@ -316,12 +316,12 @@ class DashboardController extends Controller
 
         // PERBAIKAN: Tidak melakukan filtering di backend karena filtering dilakukan di Node.js
         // if ($userRole) {
-        //     $query = $query->visibleToRole($userRole, $userLineNumber);
+        //     $query = $query->visibleToRole($userRole, $userLineName);
         // }
 
         // PERBAIKAN: Department users tidak boleh menerima notifikasi problem baru
         // Mereka hanya menerima notifikasi ketika problem di-forward ke mereka
-        // if (in_array($userRole, ['maintenance', 'quality', 'warehouse'])) {
+        // if (in_array($userRole, ['maintenance', 'quality', 'engineering'])) {
         //     return collect([]); // Return empty collection untuk department users
         // }
 
@@ -330,7 +330,7 @@ class DashboardController extends Controller
                 'id' => $problem->id,
                 'machine' => $problem->tipe_mesin,
                 'machine_name' => $problem->tipe_mesin,
-                'line_number' => $problem->line_number,
+                'line_name' => $problem->line_name,
                 'problem_type' => $problem->tipe_problem,
                 'problemType' => $problem->tipe_problem,
                 'timestamp' => Carbon::parse($problem->timestamp)->format('H:i:s'),
@@ -376,7 +376,7 @@ class DashboardController extends Controller
             'id' => $problem->id,
             'machine' => $problem->tipe_mesin,
             'problem_type' => $problem->tipe_problem,
-            'line_number' => $problem->line_number,
+                'line_name' => $problem->line_name,
             'status' => $problem->status,
             'problem_status' => $problemStatus,
             'timestamp' => Carbon::parse($problem->timestamp)->format('d/m/Y H:i:s'),
@@ -411,7 +411,7 @@ class DashboardController extends Controller
     {
         $severityMap = [
             'Quality' => 'high',
-            'Material' => 'medium',
+            'Engineering' => 'medium',
             'Machine' => 'critical'
         ];
 
@@ -425,7 +425,7 @@ class DashboardController extends Controller
     {
         $descriptions = [
             'Quality' => 'Terdeteksi penurunan kualitas produk atau hasil produksi tidak sesuai standar',
-            'Material' => 'Terdeteksi kekurangan material yang dapat menyebabkan efisiensi produksi',
+            'Engineering' => 'Terdeteksi masalah engineering yang dapat menyebabkan efisiensi produksi',
             'Machine' => 'Mesin mengalami kondisi abnormal'
         ];
 
@@ -439,7 +439,7 @@ class DashboardController extends Controller
     {
         $actions = [
             'Quality' => 'Periksa parameter produksi dan kalibrasi sensor quality control',
-            'Material' => 'Hentikan mesin dan isi ulang material sesegera mungkin',
+            'Engineering' => 'Hentikan mesin dan hubungi tim engineering sesegera mungkin',
             'Machine' => 'Periksa kondisi mesin, pastikan tidak ada komponen yang aus atau rusak'
         ];
 
@@ -506,22 +506,22 @@ class DashboardController extends Controller
 
     public function getDashboardStats(Request $request)
     {
-        // Ambil line_number dari permintaan. Jika tidak ada, nilainya akan null.
-        $lineNumber = $request->input('line_number');
+        // Ambil line_name dari permintaan. Jika tidak ada, nilainya akan null.
+        $lineName = $request->input('line_name');
         $userTimezone = config('app.timezone'); // Mengambil timezone dari config
 
         // --- Query untuk Total Meja ---
         $totalMachinesQuery = \App\Models\InspectionTable::query();
-        if ($lineNumber) {
-            // Jika ada line_number, filter berdasarkan itu.
-            $totalMachinesQuery->where('line_number', $lineNumber);
+        if ($lineName) {
+            // Jika ada line_name, filter berdasarkan itu.
+            $totalMachinesQuery->where('line_name', $lineName);
         }
 
         // --- Query untuk Log Problem ---
         $logQuery = \App\Models\Log::query();
-        if ($lineNumber) {
-            // Jika ada line_number, filter berdasarkan itu.
-            $logQuery->where('line_number', $lineNumber);
+        if ($lineName) {
+            // Jika ada line_name, filter berdasarkan itu.
+            $logQuery->where('line_name', $lineName);
         }
         
         // Buat klon query untuk penggunaan berulang agar lebih efisien
@@ -598,7 +598,7 @@ class DashboardController extends Controller
                 ->where('user_sessions.token', str_replace('Bearer ', '', $token))
                 ->where('users.active', 1)
                 ->where('user_sessions.expires_at', '>', Carbon::now(config('app.timezone')))
-                ->select('users.id', 'users.name', 'users.role', 'users.line_number')
+                ->select('users.id', 'users.name', 'users.role', 'users.line_name')
                 ->first();
 
             if (!$session) {
@@ -651,7 +651,7 @@ class DashboardController extends Controller
                 $targetRole = 'quality';
                 break;
             case 'material':
-                $targetRole = 'warehouse';
+                $targetRole = 'engineering';
                 break;
             default:
                 return response()->json([
@@ -673,7 +673,7 @@ class DashboardController extends Controller
             'problem_id' => $problem->id,
             'machine_name' => $problem->tipe_mesin,
             'problem_type' => $problem->tipe_problem,
-            'line_number' => $problem->line_number,
+                'line_name' => $problem->line_name,
             'target_role' => $targetRole,
             'forwarded_by' => $session->name,
             'forwarded_by_id' => $session->id,
@@ -692,7 +692,7 @@ class DashboardController extends Controller
             [
                 'machine_name' => $problem->tipe_mesin,
                 'problem_type' => $problem->tipe_problem,
-                'line_number' => $problem->line_number
+                'line_name' => $problem->line_name
             ]
         );
 
@@ -724,7 +724,7 @@ class DashboardController extends Controller
                 ->where('user_sessions.token', str_replace('Bearer ', '', $token))
                 ->where('users.active', 1)
                 ->where('user_sessions.expires_at', '>', Carbon::now(config('app.timezone')))
-                ->select('users.id', 'users.name', 'users.role', 'users.line_number')
+                ->select('users.id', 'users.name', 'users.role', 'users.line_name')
                 ->first();
 
             if (!$session) {
@@ -777,7 +777,7 @@ class DashboardController extends Controller
             [
                 'machine_name' => $problem->tipe_mesin,
                 'problem_type' => $problem->tipe_problem,
-                'line_number' => $problem->line_number
+                'line_name' => $problem->line_name
             ]
         );
 
@@ -813,7 +813,7 @@ class DashboardController extends Controller
                 ->where('user_sessions.token', str_replace('Bearer ', '', $token))
                 ->where('users.active', 1)
                 ->where('user_sessions.expires_at', '>', Carbon::now(config('app.timezone')))
-                ->select('users.id', 'users.name', 'users.role', 'users.line_number')
+                ->select('users.id', 'users.name', 'users.role', 'users.line_name')
                 ->first();
 
             if (!$session) {
@@ -867,7 +867,7 @@ class DashboardController extends Controller
             [
                 'machine_name' => $problem->tipe_mesin,
                 'problem_type' => $problem->tipe_problem,
-                'line_number' => $problem->line_number
+                'line_name' => $problem->line_name
             ]
         );
 
@@ -904,7 +904,7 @@ class DashboardController extends Controller
                 ->where('user_sessions.token', str_replace('Bearer ', '', $token))
                 ->where('users.active', 1)
                 ->where('user_sessions.expires_at', '>', Carbon::now(config('app.timezone')))
-                ->select('users.id', 'users.name', 'users.role', 'users.line_number')
+                ->select('users.id', 'users.name', 'users.role', 'users.line_name')
                 ->first();
 
             if (!$session) {
@@ -986,7 +986,7 @@ class DashboardController extends Controller
             [
                 'machine_name' => $problem->tipe_mesin,
                 'problem_type' => $problem->tipe_problem,
-                'line_number' => $problem->line_number,
+                'line_name' => $problem->line_name,
                 'duration_seconds' => $problem->duration_in_seconds,
                 'is_direct_resolve' => $isDirectResolve
             ]
@@ -1038,7 +1038,7 @@ class DashboardController extends Controller
                 'event_timestamp' => $log->formatted_event_timestamp,
                 'machine_name' => $log->problem ? $log->problem->tipe_mesin : 'Unknown',
                 'problem_type' => $log->problem ? $log->problem->tipe_problem : 'Unknown',
-                'line_number' => $log->problem ? $log->problem->line_number : 'Unknown',
+                'line_name' => $log->problem ? $log->problem->line_name : 'Unknown',
                 'metadata' => $log->metadata
             ];
         });

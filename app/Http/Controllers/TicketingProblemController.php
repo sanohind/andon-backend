@@ -34,7 +34,7 @@ class TicketingProblemController extends Controller
                     'problem_id' => $ticketing->problem_id,
                     'machine' => $ticketing->problem ? $ticketing->problem->tipe_mesin : 'Unknown',
                     'problem_type' => $ticketing->problem ? $ticketing->problem->tipe_problem : 'Unknown',
-                    'line_number' => $ticketing->problem ? $ticketing->problem->line_number : 'Unknown',
+                    'line_name' => $ticketing->problem ? $ticketing->problem->line_name : 'Unknown',
                     'pic_technician' => $ticketing->pic_technician,
                     'diagnosis' => $ticketing->diagnosis,
                     'result_repair' => $ticketing->result_repair,
@@ -99,7 +99,7 @@ class TicketingProblemController extends Controller
                 ->where('user_sessions.token', str_replace('Bearer ', '', $token))
                 ->where('users.active', 1)
                 ->where('user_sessions.expires_at', '>', Carbon::now(config('app.timezone')))
-                ->select('users.id', 'users.name', 'users.role', 'users.line_number')
+                ->select('users.id', 'users.name', 'users.role', 'users.line_name')
                 ->first();
 
             if (!$session) {
@@ -109,11 +109,11 @@ class TicketingProblemController extends Controller
                 ], 401);
             }
 
-            // Validasi bahwa yang membuat ticketing adalah user maintenance
-            if ($session->role !== 'maintenance') {
+            // Validasi bahwa yang membuat ticketing adalah user maintenance, quality, atau engineering
+            if (!in_array($session->role, ['maintenance', 'quality', 'engineering'])) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Hanya user maintenance yang dapat membuat ticketing problem.'
+                    'message' => 'Hanya user maintenance, quality, atau engineering yang dapat membuat ticketing problem.'
                 ], 403);
             }
 
@@ -210,7 +210,7 @@ class TicketingProblemController extends Controller
                 ->where('user_sessions.token', str_replace('Bearer ', '', $token))
                 ->where('users.active', 1)
                 ->where('user_sessions.expires_at', '>', Carbon::now(config('app.timezone')))
-                ->select('users.id', 'users.name', 'users.role', 'users.line_number')
+                ->select('users.id', 'users.name', 'users.role', 'users.line_name')
                 ->first();
 
             if (!$session) {
@@ -320,7 +320,7 @@ class TicketingProblemController extends Controller
                 'problem_id' => $ticketing->problem_id,
                 'machine' => $ticketing->problem ? $ticketing->problem->tipe_mesin : 'Unknown',
                 'problem_type' => $ticketing->problem ? $ticketing->problem->tipe_problem : 'Unknown',
-                'line_number' => $ticketing->problem ? $ticketing->problem->line_number : 'Unknown',
+                'line_name' => $ticketing->problem ? $ticketing->problem->line_name : 'Unknown',
                 'pic_technician' => $ticketing->pic_technician,
                 'diagnosis' => $ticketing->diagnosis,
                 'result_repair' => $ticketing->result_repair,

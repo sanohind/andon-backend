@@ -21,7 +21,7 @@ class Log extends Model
         'timestamp',
         'tipe_mesin', 
         'tipe_problem',
-        'line_number',
+        'line_name',
         'status',
         'resolved_at', 
         'duration_in_seconds',
@@ -50,7 +50,7 @@ class Log extends Model
         'is_forwarded' => 'integer',
         'is_received' => 'integer',
         'has_feedback_resolved' => 'integer',
-        'line_number' => 'integer',
+        'line_name' => 'string',
         'duration_in_seconds' => 'integer',
         'forwarded_by_user_id' => 'integer',
         'received_by_user_id' => 'integer',
@@ -145,7 +145,7 @@ class Log extends Model
     {
         $severityMap = [
             'Quality' => 'high',
-            'Material' => 'medium', 
+            'Engineering' => 'medium', 
             'Machine' => 'critical'
         ];
 
@@ -248,23 +248,24 @@ class Log extends Model
     /**
      * Scope untuk problem berdasarkan role visibility
      */
-    public function scopeVisibleToRole($query, $userRole, $userLineNumber = null)
+    public function scopeVisibleToRole($query, $userRole, $userLineName = null)
     {
         switch ($userRole) {
             case 'admin':
-                // Admin bisa melihat semua problem
+            case 'manager':
+                // Admin dan Manager bisa melihat semua problem
                 return $query;
                 
             case 'leader':
                 // Leader hanya bisa melihat problem di line mereka
-                if ($userLineNumber) {
-                    return $query->where('line_number', $userLineNumber);
+                if ($userLineName) {
+                    return $query->where('line_name', $userLineName);
                 }
                 return $query;
                 
             case 'maintenance':
             case 'quality':
-            case 'warehouse':
+            case 'engineering':
                 // User department hanya bisa melihat problem yang sudah di-forward ke mereka
                 return $query->where('is_forwarded', true)
                     ->where('forwarded_to_role', $userRole);
@@ -315,7 +316,7 @@ class Log extends Model
             return false;
         }
         
-        if ($user->line_number != $this->line_number) {
+        if ($user->line_name != $this->line_name) {
             return false;
         }
         
@@ -387,7 +388,7 @@ class Log extends Model
             return false;
         }
         
-        if ($user->line_number != $this->line_number) {
+        if ($user->line_name != $this->line_name) {
             return false;
         }
         
@@ -408,7 +409,7 @@ class Log extends Model
             return false;
         }
         
-        if ($user->line_number != $this->line_number) {
+        if ($user->line_name != $this->line_name) {
             return false;
         }
         

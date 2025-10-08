@@ -11,7 +11,7 @@ class UserController extends Controller
 {
     public function index()
     {
-        return User::select('id', 'name', 'username', 'role', 'line_number')->get();
+        return User::select('id', 'name', 'username', 'role', 'line_name')->get();
     }
 
     public function store(Request $request)
@@ -20,8 +20,8 @@ class UserController extends Controller
             'name' => 'required|string|max:255',
             'username' => 'required|string|max:255|unique:users',
             'password' => 'required|string|min:8',
-            'role' => ['required', Rule::in(['admin', 'leader', 'maintenance', 'quality', 'warehouse'])],
-            'line_number' => 'nullable|integer|required_if:role,leader',
+            'role' => ['required', Rule::in(['admin', 'manager', 'leader', 'maintenance', 'quality', 'engineering'])],
+            'line_name' => 'nullable|string|max:50|required_if:role,leader',
         ]);
 
         $user = User::create([
@@ -29,7 +29,7 @@ class UserController extends Controller
             'username' => $validated['username'],
             'password' => Hash::make($validated['password']),
             'role' => $validated['role'],
-            'line_number' => $validated['role'] === 'leader' ? $validated['line_number'] : null,
+            'line_name' => $validated['role'] === 'leader' ? $validated['line_name'] : null,
         ]);
 
         return response()->json($user, 201);
