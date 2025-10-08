@@ -3,13 +3,22 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
 use App\Models\InspectionTable;
+use App\Models\ProductionData;
 use Illuminate\Http\Request;
+use Carbon\Carbon;
 
 class InspectionTableController extends Controller
 {
     public function index()
     {
-        return InspectionTable::orderBy('name')->get();
+        $tables = InspectionTable::all();
+        
+        // Sort using natural order (handles numbers correctly)
+        $tables = $tables->sort(function($a, $b) {
+            return strnatcasecmp($a->name, $b->name);
+        });
+        
+        return $tables->values();
     }
 
     public function store(Request $request)
@@ -28,7 +37,18 @@ class InspectionTableController extends Controller
             return response()->json(['message' => 'Nama meja untuk line tersebut sudah ada.'], 422);
         }
 
-        return InspectionTable::create($validated);
+        // Buat meja baru
+        $inspectionTable = InspectionTable::create($validated);
+
+        // Auto-insert ke production_data untuk memulai penghitungan quantity
+        ProductionData::create([
+            'timestamp' => Carbon::now('Asia/Jakarta'),
+            'machine_name' => $validated['name'],
+            'line_name' => $validated['line_name'],
+            'quantity' => 0
+        ]);
+
+        return $inspectionTable;
     }
 
     public function update(Request $request, InspectionTable $inspectionTable)

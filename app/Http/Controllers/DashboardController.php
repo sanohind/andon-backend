@@ -15,9 +15,15 @@ class DashboardController extends Controller
 {
     private function getAllMachineNames()
     {
-        // Mengambil semua record dari tabel inspection_tables, 
-        // diurutkan berdasarkan nama, dan hanya mengambil kolom 'name'.
-        return InspectionTable::orderBy('name', 'asc')->pluck('name');
+        // Mengambil semua record dari tabel inspection_tables
+        $tables = InspectionTable::all();
+        
+        // Sort using natural order (handles numbers correctly)
+        $tables = $tables->sort(function($a, $b) {
+            return strnatcasecmp($a->name, $b->name);
+        });
+        
+        return $tables->pluck('name');
     }
     /**
      * Tampilkan dashboard monitoring
@@ -37,7 +43,17 @@ class DashboardController extends Controller
     public function getMachineStatuses(Request $request)
     {
         // Ambil SEMUA meja, karena filter akan dilakukan di frontend Node.js/EJS
-        $allInspectionTables = InspectionTable::orderBy('line_name')->orderBy('name')->get();
+        $allInspectionTables = InspectionTable::all();
+        
+        // Sort using natural order (handles numbers correctly)
+        $allInspectionTables = $allInspectionTables->sort(function($a, $b) {
+            // First sort by line_name, then by name
+            $lineCompare = strnatcasecmp($a->line_name, $b->line_name);
+            if ($lineCompare !== 0) {
+                return $lineCompare;
+            }
+            return strnatcasecmp($a->name, $b->name);
+        });
         
         // Siapkan struktur data yang dikelompokkan per line
         $groupedStatuses = [];
@@ -104,7 +120,17 @@ class DashboardController extends Controller
     public function getMachineStatusesWithRoleFilter(Request $request, $userRole = null, $userLineName = null)
     {
         // Ambil SEMUA meja, karena filter akan dilakukan di frontend Node.js/EJS
-        $allInspectionTables = InspectionTable::orderBy('line_name')->orderBy('name')->get();
+        $allInspectionTables = InspectionTable::all();
+        
+        // Sort using natural order (handles numbers correctly)
+        $allInspectionTables = $allInspectionTables->sort(function($a, $b) {
+            // First sort by line_name, then by name
+            $lineCompare = strnatcasecmp($a->line_name, $b->line_name);
+            if ($lineCompare !== 0) {
+                return $lineCompare;
+            }
+            return strnatcasecmp($a->name, $b->name);
+        });
         
         // Siapkan struktur data yang dikelompokkan per line
         $groupedStatuses = [];
