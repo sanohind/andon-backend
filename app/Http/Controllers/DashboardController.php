@@ -117,7 +117,7 @@ class DashboardController extends Controller
     /**
      * Get status semua mesin dengan role-based filtering
      */
-    public function getMachineStatusesWithRoleFilter(Request $request, $userRole = null, $userLineName = null)
+    public function getMachineStatusesWithRoleFilter(Request $request, $userRole = null, $userLineName = null, $userDivision = null)
     {
         // Ambil SEMUA meja, karena filter akan dilakukan di frontend Node.js/EJS
         $allInspectionTables = InspectionTable::all();
@@ -184,8 +184,11 @@ class DashboardController extends Controller
                 } elseif ($userRole === 'leader') {
                     // Leader hanya melihat problem dari line mereka
                     $shouldShowProblem = $activeProblem->line_name == $userLineName;
-                } elseif (in_array($userRole, ['admin', 'manager'])) {
-                    // Admin dan Manager melihat semua problem
+                } elseif ($userRole === 'manager') {
+                    // Manager melihat semua problem dari divisi mereka
+                    $shouldShowProblem = $activeProblem->division == $userDivision;
+                } elseif (in_array($userRole, ['admin'])) {
+                    // Admin melihat semua problem
                     $shouldShowProblem = true;
                 }
 
@@ -221,7 +224,7 @@ class DashboardController extends Controller
     /**
      * Get daftar problem yang sedang aktif dengan role-based visibility
      */
-    public function getActiveProblems(Request $request = null, $userRole = null, $userLineName = null)
+    public function getActiveProblems(Request $request = null, $userRole = null, $userLineName = null, $userDivision = null)
     {
         $query = Log::active()
             ->with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])
@@ -282,6 +285,7 @@ class DashboardController extends Controller
         // Get user info from token if available
         $userRole = null;
         $userLineName = null;
+        $userDivision = null;
         
         $token = $request->bearerToken() ?? $request->header('Authorization');
         if ($token) {
@@ -291,12 +295,13 @@ class DashboardController extends Controller
                     ->where('user_sessions.token', str_replace('Bearer ', '', $token))
                     ->where('users.active', 1)
                     ->where('user_sessions.expires_at', '>', Carbon::now(config('app.timezone')))
-                    ->select('users.role', 'users.line_name')
+                    ->select('users.role', 'users.line_name', 'users.division')
                     ->first();
 
                 if ($session) {
                     $userRole = $session->role;
                     $userLineName = $session->line_name;
+                    $userDivision = $session->division;
                 }
             } catch (\Exception $e) {
                 // Continue without user info if token validation fails
@@ -309,12 +314,13 @@ class DashboardController extends Controller
             'has_token' => !empty($token),
             'user_role' => $userRole,
             'user_line' => $userLineName,
+            'user_division' => $userDivision,
             'ip' => $request->ip()
         ]);
 
         $machineStatusesGroupedByLine = $this->getMachineStatuses($request); 
-        $activeProblems = $this->getActiveProblems($request, $userRole, $userLineName);
-        $newProblems = $this->getNewProblems($request, $userRole, $userLineName);
+        $activeProblems = $this->getActiveProblems($request, $userRole, $userLineName, $userDivision);
+        $newProblems = $this->getNewProblems($request, $userRole, $userLineName, $userDivision);
         
         return response()->json([
             'success' => true,
@@ -324,6 +330,7 @@ class DashboardController extends Controller
                 'new_problems' => $newProblems,
                 'user_role' => $userRole,
                 'user_line_name' => $userLineName,
+                'user_division' => $userDivision,
                 'timestamp' => Carbon::now(config('app.timezone'))->format('Y-m-d H:i:s')
             ]
         ]);
@@ -332,7 +339,7 @@ class DashboardController extends Controller
     /**
      * Get problem baru dalam 10 detik terakhir (untuk notifikasi) dengan role-based visibility
      */
-    public function getNewProblems(Request $request = null, $userRole = null, $userLineName = null)
+    public function getNewProblems(Request $request = null, $userRole = null, $userLineName = null, $userDivision = null)
     {
         $tenSecondsAgo = Carbon::now(config('app.timezone'))->subSeconds(10);
         

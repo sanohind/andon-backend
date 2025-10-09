@@ -340,7 +340,7 @@
       array (
         'driver' => 'mysql',
         'url' => NULL,
-        'host' => '10.1.101.98',
+        'host' => '10.1.101.61',
         'port' => '5432',
         'database' => 'iot_project',
         'username' => 'admin',
@@ -360,7 +360,7 @@
       array (
         'driver' => 'mariadb',
         'url' => NULL,
-        'host' => '10.1.101.98',
+        'host' => '10.1.101.61',
         'port' => '5432',
         'database' => 'iot_project',
         'username' => 'admin',
@@ -380,7 +380,7 @@
       array (
         'driver' => 'pgsql',
         'url' => NULL,
-        'host' => '10.1.101.98',
+        'host' => '10.1.101.61',
         'port' => '5432',
         'database' => 'iot_project',
         'username' => 'admin',
@@ -405,7 +405,7 @@
       array (
         'driver' => 'sqlsrv',
         'url' => NULL,
-        'host' => '10.1.101.98',
+        'host' => '10.1.101.61',
         'port' => '5432',
         'database' => 'iot_project',
         'username' => 'admin',

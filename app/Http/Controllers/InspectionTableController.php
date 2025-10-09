@@ -25,7 +25,8 @@ class InspectionTableController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'line_name' => 'required|string|max:50'
+            'line_name' => 'required|string|max:50',
+            'division' => 'required|string|max:50'
         ]);
 
         // Validasi unik secara manual

@@ -44,6 +44,8 @@ Route::prefix('dashboard')->group(function () {
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/users', [UserController::class, 'index']);
     Route::post('/users', [UserController::class, 'store']);
+    Route::put('/users/{user}', [UserController::class, 'update']);
+    Route::delete('/users/{user}', [UserController::class, 'destroy']);
     Route::apiResource('/inspection-tables', InspectionTableController::class);
     Route::get('/machine-status/{name}', [InspectionTableController::class, 'getMachineStatus']);
     Route::get('dashboard/status', [DashboardController::class, 'getStatusApi']);
