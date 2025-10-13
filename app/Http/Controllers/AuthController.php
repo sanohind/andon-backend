@@ -237,6 +237,35 @@ class AuthController extends Controller
     }
 
     /**
+     * Get current authenticated user info using Sanctum
+     */
+    public function sanctumUser(Request $request)
+    {
+        $user = $request->user();
+        
+        if (!$user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthenticated'
+            ], 401);
+        }
+
+        return response()->json([
+            'success' => true,
+            'user' => [
+                'id' => $user->id,
+                'username' => $user->username,
+                'name' => $user->name,
+                'role' => $user->role,
+                'division' => $user->division,
+                'line_name' => $user->line_name,
+                'created_at' => $user->created_at,
+                'last_login' => $user->last_login
+            ]
+        ]);
+    }
+
+    /**
      * Cleanup expired sessions (untuk dijadwalkan di cron job)
      */
     public function cleanupExpiredSessions()
