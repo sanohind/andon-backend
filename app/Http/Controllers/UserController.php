@@ -11,7 +11,17 @@ class UserController extends Controller
 {
     public function index()
     {
-        return User::select('id', 'name', 'username', 'role', 'division', 'line_name')->get();
+        try {
+            return User::select('id', 'name', 'username', 'role', 'division', 'line_name')->get();
+        } catch (\Exception $e) {
+            // Fallback jika kolom division belum ada
+            return User::select('id', 'name', 'username', 'role', 'line_name')
+                ->get()
+                ->map(function($user) {
+                    $user->division = null;
+                    return $user;
+                });
+        }
     }
 
     public function store(Request $request)
@@ -30,9 +40,18 @@ class UserController extends Controller
             'username' => $validated['username'],
             'password' => Hash::make($validated['password']),
             'role' => $validated['role'],
-            'division' => $validated['division'] ?? null,
             'line_name' => $validated['role'] === 'leader' ? $validated['line_name'] : null,
         ]);
+
+        // Tambahkan division jika kolom ada
+        try {
+            if (isset($validated['division'])) {
+                $user->division = $validated['division'];
+                $user->save();
+            }
+        } catch (\Exception $e) {
+            // Kolom division belum ada, skip
+        }
 
         return response()->json($user, 201);
     }
@@ -51,8 +70,16 @@ class UserController extends Controller
         $user->name = $validated['name'];
         $user->username = $validated['username'];
         $user->role = $validated['role'];
-        $user->division = $validated['division'] ?? null;
         $user->line_name = $validated['role'] === 'leader' ? ($validated['line_name'] ?? null) : null;
+
+        // Tambahkan division jika kolom ada
+        try {
+            if (isset($validated['division'])) {
+                $user->division = $validated['division'];
+            }
+        } catch (\Exception $e) {
+            // Kolom division belum ada, skip
+        }
 
         if (!empty($validated['password'])) {
             $user->password = Hash::make($validated['password']);
