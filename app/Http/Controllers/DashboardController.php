@@ -381,14 +381,19 @@ class DashboardController extends Controller
      */
     public function getProblemDetail($id)
     {
+        \Log::info('getProblemDetail called with ID: ' . $id);
+        
         $problem = Log::with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])->find($id);
         
         if (!$problem) {
+            \Log::warning('Problem not found with ID: ' . $id);
             return response()->json([
                 'success' => false,
                 'message' => 'Problem tidak ditemukan'
             ], 404);
         }
+        
+        \Log::info('Problem found: ' . $problem->tipe_mesin);
         
         // PERBAIKAN: Gunakan timezone dari config untuk konsistensi
         $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, config('app.timezone'));
