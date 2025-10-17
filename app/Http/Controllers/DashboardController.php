@@ -38,12 +38,67 @@ class DashboardController extends Controller
     }
 
     /**
+     * Get division and line mapping for manager filtering
+     */
+    private function getDivisionLineMapping()
+    {
+        return [
+            'Brazing' => [
+                'Leak Test Inspection',
+                'Support',
+                'Hand Bending',
+                'Welding'
+            ],
+            'Chassis' => [
+                'Cutting',
+                'Flaring',
+                'MF/TK',
+                'LRFD',
+                'Assy'
+            ],
+            'Nylon' => [
+                'Injection/Extrude',
+                'Roda Dua',
+                'Roda Empat'
+            ]
+        ];
+    }
+
+    /**
+     * Check if manager can see specific line based on their division
+     */
+    private function canManagerSeeLine($managerDivision, $lineName)
+    {
+        $mapping = $this->getDivisionLineMapping();
+        
+        if (!isset($mapping[$managerDivision])) {
+            return false;
+        }
+        
+        return in_array($lineName, $mapping[$managerDivision]);
+    }
+
+    /**
      * Get status semua mesin (untuk display lampu indikator)
      */
     public function getMachineStatuses(Request $request)
     {
+        // Get user role and division from request or session
+        $userRole = $request->input('user_role') ?? $request->header('X-User-Role');
+        $userDivision = $request->input('user_division') ?? $request->header('X-User-Division');
+        
         // Ambil SEMUA meja, karena filter akan dilakukan di frontend Node.js/EJS
         $allInspectionTables = InspectionTable::all();
+        
+        // Filter tables based on user role and division
+        if ($userRole === 'manager' && $userDivision) {
+            $mapping = $this->getDivisionLineMapping();
+            $allowedLines = $mapping[$userDivision] ?? [];
+            
+            $allInspectionTables = $allInspectionTables->filter(function($table) use ($allowedLines) {
+                return in_array($table->line_name, $allowedLines);
+            });
+        }
         
         // Sort using natural order (handles numbers correctly)
         $allInspectionTables = $allInspectionTables->sort(function($a, $b) {
@@ -58,13 +113,23 @@ class DashboardController extends Controller
         // Siapkan struktur data yang dikelompokkan per line
         $groupedStatuses = [];
 
-        // Ambil semua data log problem dengan kombinasi tipe_mesin DAN line_name
+        // Ambil semua data log problem dengan JOIN ke inspection_tables untuk mendapatkan nama mesin
+        // PERBAIKAN: Tambahkan filtering berdasarkan line_name untuk mencegah cross-line problem
         $activeProblems = DB::table('log')
-            ->where('status', 'ON')
+            ->select([
+                'log.*',
+                'inspection_tables.name as machine_name',
+                'inspection_tables.line_name as table_line_name'
+            ])
+            ->join('inspection_tables', function($join) {
+                $join->on('log.tipe_mesin', '=', 'inspection_tables.address')
+                     ->on('log.line_name', '=', 'inspection_tables.line_name');
+            })
+            ->where('log.status', 'ON')
             ->get()
             ->keyBy(function($item) {
-                // PERBAIKAN: Gunakan kombinasi tipe_mesin dan line_name sebagai key
-                return $item->tipe_mesin . '_line_' . $item->line_name;
+                // Gunakan kombinasi nama mesin dan line_name sebagai key
+                return $item->machine_name . '_line_' . $item->table_line_name;
             });
 
         // Ambil data produksi terbaru dengan kombinasi machine_name dan line_name
@@ -226,16 +291,33 @@ class DashboardController extends Controller
      */
     public function getActiveProblems(Request $request = null, $userRole = null, $userLineName = null, $userDivision = null)
     {
-        $query = Log::active()
-            ->with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])
-            ->orderBy('timestamp', 'desc');
+        // Use JOIN to get machine names from inspection_tables
+        // PERBAIKAN: Tambahkan filtering berdasarkan line_name untuk mencegah cross-line problem
+        $query = DB::table('log')
+            ->select([
+                'log.*',
+                'inspection_tables.name as machine_name',
+                'inspection_tables.line_name as table_line_name'
+            ])
+            ->join('inspection_tables', function($join) {
+                $join->on('log.tipe_mesin', '=', 'inspection_tables.address')
+                     ->on('log.line_name', '=', 'inspection_tables.line_name');
+            })
+            ->where('log.status', 'ON');
+            
+        // Filter based on user role and division
+        if ($userRole === 'manager' && $userDivision) {
+            $mapping = $this->getDivisionLineMapping();
+            $allowedLines = $mapping[$userDivision] ?? [];
+            
+            if (!empty($allowedLines)) {
+                $query->whereIn('inspection_tables.line_name', $allowedLines);
+            }
+        }
+        
+        $problems = $query->orderBy('log.timestamp', 'desc')->get();
 
-        // PERBAIKAN: Tidak melakukan filtering di backend karena filtering dilakukan di Node.js
-        // if ($userRole) {
-        //     $query = $query->visibleToRole($userRole, $userLineName);
-        // }
-
-        return $query->get()->map(function($problem) {
+        return $problems->map(function($problem) {
             // PERBAIKAN: Gunakan timezone dari config untuk konsistensi
             $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, config('app.timezone'));
             
@@ -253,9 +335,9 @@ class DashboardController extends Controller
             
             return [
                 'id' => $problem->id,
-                'machine' => $problem->tipe_mesin,
+                'machine' => $problem->machine_name, // Use machine name instead of address
                 'problem_type' => $problem->tipe_problem,
-                'line_name' => $problem->line_name,
+                'line_name' => $problem->table_line_name, // Use line name from inspection_tables
                 'timestamp' => Carbon::parse($problem->timestamp)->format('d/m/Y H:i:s'),
                 'duration' => $problemTimestamp->diffForHumans(),
                 'severity' => $this->getProblemSeverity($problem->tipe_problem),
@@ -263,13 +345,13 @@ class DashboardController extends Controller
                 'status' => $problem->status,
                 'is_forwarded' => $problem->is_forwarded,
                 'forwarded_to_role' => $problem->forwarded_to_role,
-                'forwarded_by' => $problem->forwardedByUser ? $problem->forwardedByUser->name : null,
+                'forwarded_by' => null, // Will be null since we're not loading relationships
                 'forwarded_at' => $problem->forwarded_at ? Carbon::parse($problem->forwarded_at)->format('d/m/Y H:i:s') : null,
                 'is_received' => $problem->is_received,
-                'received_by' => $problem->receivedByUser ? $problem->receivedByUser->name : null,
+                'received_by' => null, // Will be null since we're not loading relationships
                 'received_at' => $problem->received_at ? Carbon::parse($problem->received_at)->format('d/m/Y H:i:s') : null,
                 'has_feedback_resolved' => $problem->has_feedback_resolved,
-                'feedback_resolved_by' => $problem->feedbackResolvedByUser ? $problem->feedbackResolvedByUser->name : null,
+                'feedback_resolved_by' => null, // Will be null since we're not loading relationships
                 'feedback_resolved_at' => $problem->feedback_resolved_at ? Carbon::parse($problem->feedback_resolved_at)->format('d/m/Y H:i:s') : null,
                 'forward_message' => $problem->forward_message,
                 'feedback_message' => $problem->feedback_message
@@ -286,6 +368,10 @@ class DashboardController extends Controller
         $userRole = null;
         $userLineName = null;
         $userDivision = null;
+        
+        // Also check headers for user info (for manager filtering)
+        $userRole = $userRole ?? $request->header('X-User-Role');
+        $userDivision = $userDivision ?? $request->header('X-User-Division');
         
         $token = $request->bearerToken() ?? $request->header('Authorization');
         if ($token) {
@@ -377,23 +463,91 @@ class DashboardController extends Controller
     }
 
     /**
+     * Get problems that have been active for more than 15 minutes (for manager notifications)
+     */
+    public function getManagerUnresolvedProblems(Request $request = null)
+    {
+        try {
+            $fifteenMinutesAgo = Carbon::now(config('app.timezone'))->subMinutes(15);
+            
+            // Get user division from request
+            $userDivision = $request->input('user_division') ?? $request->header('X-User-Division');
+            
+            $query = DB::table('log')
+                ->select([
+                    'log.*',
+                    'inspection_tables.name as machine_name',
+                    'inspection_tables.line_name as table_line_name'
+                ])
+                ->join('inspection_tables', function($join) {
+                    $join->on('log.tipe_mesin', '=', 'inspection_tables.address')
+                         ->on('log.line_name', '=', 'inspection_tables.line_name');
+                })
+                ->where('log.status', 'ON')
+                ->where('log.timestamp', '<=', $fifteenMinutesAgo)
+                ->where('log.is_forwarded', false); // Belum di-forward
+                
+            // Filter based on manager division
+            if ($userDivision) {
+                $mapping = $this->getDivisionLineMapping();
+                $allowedLines = $mapping[$userDivision] ?? [];
+                
+                if (!empty($allowedLines)) {
+                    $query->whereIn('inspection_tables.line_name', $allowedLines);
+                }
+            }
+            
+            $unresolvedProblems = $query->orderBy('log.timestamp', 'asc')->get();
+
+            $unresolvedProblemsData = $unresolvedProblems->map(function($problem) {
+                $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, config('app.timezone'));
+                $duration = $problemTimestamp->diffInMinutes(Carbon::now(config('app.timezone')));
+                
+                return [
+                    'id' => $problem->id,
+                    'machine' => $problem->machine_name,
+                    'machine_name' => $problem->machine_name,
+                    'line_name' => $problem->table_line_name,
+                    'problem_type' => $problem->tipe_problem,
+                    'problemType' => $problem->tipe_problem,
+                    'timestamp' => Carbon::parse($problem->timestamp)->format('d/m/Y H:i:s'),
+                    'duration_minutes' => $duration,
+                    'duration_text' => $duration . ' menit',
+                    'message' => "ALERT MANAGER: {$problem->machine_name} mengalami masalah {$problem->tipe_problem} selama {$duration} menit tanpa penanganan!",
+                    'severity' => 'critical',
+                    'problem_status' => 'unresolved_long_time',
+                    'is_manager_notification' => true
+                ];
+            });
+
+            return response()->json([
+                'success' => true,
+                'data' => $unresolvedProblemsData
+            ]);
+        } catch (\Exception $e) {
+            \Log::error('Error fetching unresolved problems for manager: ' . $e->getMessage());
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch unresolved problems for manager',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
      * Get detail problem untuk popup
      */
     public function getProblemDetail($id)
     {
-        \Log::info('getProblemDetail called with ID: ' . $id);
-        
         $problem = Log::with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])->find($id);
         
         if (!$problem) {
-            \Log::warning('Problem not found with ID: ' . $id);
             return response()->json([
                 'success' => false,
                 'message' => 'Problem tidak ditemukan'
             ], 404);
         }
-        
-        \Log::info('Problem found: ' . $problem->tipe_mesin);
         
         // PERBAIKAN: Gunakan timezone dari config untuk konsistensi
         $problemTimestamp = Carbon::createFromFormat('Y-m-d H:i:s', $problem->timestamp, config('app.timezone'));
@@ -544,22 +698,35 @@ class DashboardController extends Controller
 
     public function getDashboardStats(Request $request)
     {
-        // Ambil line_name dari permintaan. Jika tidak ada, nilainya akan null.
+        // Ambil context untuk filtering berdasarkan role/division/line
         $lineName = $request->input('line_name');
-        $userTimezone = config('app.timezone'); // Mengambil timezone dari config
+        $division = $request->input('division') ?? $request->header('X-User-Division');
+        $userRole = $request->input('user_role') ?? $request->header('X-User-Role');
+        $userTimezone = config('app.timezone');
 
         // --- Query untuk Total Meja ---
         $totalMachinesQuery = \App\Models\InspectionTable::query();
         if ($lineName) {
-            // Jika ada line_name, filter berdasarkan itu.
             $totalMachinesQuery->where('line_name', $lineName);
+        } elseif ($userRole === 'manager' && $division) {
+            // Filter berdasar divisi manager jika dikirim
+            $mapping = $this->getDivisionLineMapping();
+            $allowedLines = $mapping[$division] ?? [];
+            if (!empty($allowedLines)) {
+                $totalMachinesQuery->whereIn('line_name', $allowedLines);
+            }
         }
 
         // --- Query untuk Log Problem ---
         $logQuery = \App\Models\Log::query();
         if ($lineName) {
-            // Jika ada line_name, filter berdasarkan itu.
             $logQuery->where('line_name', $lineName);
+        } elseif ($userRole === 'manager' && $division) {
+            $mapping = $this->getDivisionLineMapping();
+            $allowedLines = $mapping[$division] ?? [];
+            if (!empty($allowedLines)) {
+                $logQuery->whereIn('line_name', $allowedLines);
+            }
         }
         
         // Buat klon query untuk penggunaan berulang agar lebih efisien
@@ -574,7 +741,7 @@ class DashboardController extends Controller
                                                 ->whereDate('resolved_at', \Carbon\Carbon::today($userTimezone))
                                                 ->count(),
             'critical_problems' => $criticalProblemsQuery->where('status', 'ON')
-                                                        ->where('tipe_problem', 'Machine') // Pastikan ini tipe problem kritis Anda
+                                                        ->where('tipe_problem', 'Machine')
                                                         ->count(),
         ];
 
@@ -691,6 +858,9 @@ class DashboardController extends Controller
             case 'material':
                 $targetRole = 'engineering';
                 break;
+            case 'engineering':
+                $targetRole = 'engineering';
+                break;
             default:
                 return response()->json([
                     'success' => false,
@@ -804,6 +974,17 @@ class DashboardController extends Controller
             'received_at' => Carbon::now(config('app.timezone'))
         ]);
 
+        // Jika ada ticketing terkait problem ini dan belum memiliki waktu problem_received_at, set otomatis
+        try {
+            \App\Models\TicketingProblem::where('problem_id', $problem->id)
+                ->whereNull('problem_received_at')
+                ->update([
+                    'problem_received_at' => Carbon::now(config('app.timezone'))
+                ]);
+        } catch (\Throwable $th) {
+            // ignore soft-failure agar receive tetap sukses
+        }
+
         // Log receive event
         ForwardProblemLog::logEvent(
             $problem->id,
@@ -893,6 +1074,17 @@ class DashboardController extends Controller
             'feedback_resolved_at' => Carbon::now(config('app.timezone')),
             'feedback_message' => $request->input('message', 'Problem sudah selesai ditangani.')
         ]);
+
+        // Jika ada ticketing terkait problem ini dan belum memiliki waktu repair_completed_at, set otomatis
+        try {
+            \App\Models\TicketingProblem::where('problem_id', $problem->id)
+                ->whereNull('repair_completed_at')
+                ->update([
+                    'repair_completed_at' => Carbon::now(config('app.timezone'))
+                ]);
+        } catch (\Throwable $th) {
+            // ignore soft-failure agar feedback tetap sukses
+        }
 
         // Log feedback resolved event
         ForwardProblemLog::logEvent(
@@ -1085,5 +1277,133 @@ class DashboardController extends Controller
             'success' => true,
             'data' => $logs
         ]);
+    }
+
+    /**
+     * Get active problems with JOIN to inspection_tables to get machine names
+     */
+    public function getActiveProblemsApi(Request $request)
+    {
+        try {
+            // Get user role and division from request
+            $userRole = $request->header('X-User-Role');
+            $userDivision = $request->header('X-User-Division');
+            
+            // Get the latest log entry for each machine (GROUP BY tipe_mesin)
+            // Filter status 'ON' and JOIN with inspection_tables
+            // PERBAIKAN: Tambahkan filtering berdasarkan line_name untuk mencegah cross-line problem
+            $query = DB::table('log')
+                ->select([
+                    'log.id',
+                    'log.tipe_mesin',
+                    'log.line_name',
+                    'log.tipe_problem',
+                    'log.status',
+                    'log.timestamp',
+                    'log.is_forwarded',
+                    'log.forwarded_to_role',
+                    'inspection_tables.name as machine_name',
+                    'inspection_tables.address'
+                ])
+                ->join('inspection_tables', function($join) {
+                    $join->on('log.tipe_mesin', '=', 'inspection_tables.address')
+                         ->on('log.line_name', '=', 'inspection_tables.line_name');
+                })
+                ->where('log.status', 'ON');
+                
+            // Filter based on user role and division
+            if ($userRole === 'manager' && $userDivision) {
+                $mapping = $this->getDivisionLineMapping();
+                $allowedLines = $mapping[$userDivision] ?? [];
+                
+                if (!empty($allowedLines)) {
+                    $query->whereIn('inspection_tables.line_name', $allowedLines);
+                }
+            }
+            
+            $activeProblems = $query->orderBy('log.timestamp', 'desc')->get();
+
+            return response()->json([
+                'success' => true,
+                'data' => $activeProblems
+            ]);
+
+        } catch (\Exception $e) {
+            \Log::error('Error fetching active problems: ' . $e->getMessage());
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch active problems',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Add new problem with duplicate prevention logic
+     */
+    public function addProblem(Request $request)
+    {
+        try {
+            $validated = $request->validate([
+                'tipe_mesin' => 'required|string|max:20',
+                'tipe_problem' => 'required|string|max:50',
+                'line_name' => 'required|string|max:50'
+            ]);
+
+            // Check if there's already an active problem with the same characteristics
+            $existingProblem = DB::table('log')
+                ->where('tipe_mesin', $validated['tipe_mesin'])
+                ->where('tipe_problem', $validated['tipe_problem'])
+                ->where('line_name', $validated['line_name'])
+                ->where('status', 'ON')
+                ->first();
+
+            if ($existingProblem) {
+                // Problem already exists with same characteristics, don't create duplicate
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Problem dengan karakteristik yang sama sudah aktif',
+                    'duplicate' => true,
+                    'existing_problem_id' => $existingProblem->id
+                ], 409); // 409 Conflict
+            }
+
+            // Create new problem
+            $problemId = DB::table('log')->insertGetId([
+                'timestamp' => Carbon::now(config('app.timezone')),
+                'tipe_mesin' => $validated['tipe_mesin'],
+                'tipe_problem' => $validated['tipe_problem'],
+                'line_name' => $validated['line_name'],
+                'status' => 'ON',
+                'is_forwarded' => 0,
+                'forwarded_to_role' => null,
+                'forwarded_by_user_id' => null,
+                'forwarded_at' => null,
+                'forward_message' => null,
+                'is_received' => 0,
+                'received_by_user_id' => null,
+                'received_at' => null,
+                'has_feedback_resolved' => 0,
+                'feedback_resolved_by_user_id' => null,
+                'feedback_resolved_at' => null,
+                'feedback_message' => null
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Problem berhasil ditambahkan',
+                'problem_id' => $problemId
+            ], 201);
+
+        } catch (\Exception $e) {
+            \Log::error('Error adding problem: ' . $e->getMessage());
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to add problem',
+                'error' => $e->getMessage()
+            ], 500);
+        }
     }
 }

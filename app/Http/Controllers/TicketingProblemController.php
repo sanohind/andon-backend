@@ -130,10 +130,10 @@ class TicketingProblemController extends Controller
             'pic_technician' => 'required|string|max:100',
             'diagnosis' => 'required|string',
             'result_repair' => 'required|string',
-            'problem_received_at' => 'nullable|date',
+            // problem_received_at ditetapkan otomatis saat Receive
             'diagnosis_started_at' => 'nullable|date',
             'repair_started_at' => 'nullable|date',
-            'repair_completed_at' => 'nullable|date'
+            // repair_completed_at ditetapkan otomatis saat Feedback
         ]);
 
         // Cek apakah problem sudah ada ticketing
@@ -145,12 +145,12 @@ class TicketingProblemController extends Controller
             ], 400);
         }
 
-        // Cek apakah problem adalah tipe machine dan sudah di-forward
+        // Cek apakah problem adalah tipe machine/quality/engineering dan sudah di-forward
         $problem = Log::find($request->problem_id);
-        if (!$problem || $problem->tipe_problem !== 'Machine' || !$problem->is_forwarded) {
+        if (!$problem || !in_array($problem->tipe_problem, ['Machine', 'Quality', 'Engineering', 'Material']) || !$problem->is_forwarded) {
             return response()->json([
                 'success' => false,
-                'message' => 'Ticketing hanya bisa dibuat untuk problem machine yang sudah di-forward.'
+                'message' => 'Ticketing hanya bisa dibuat untuk problem machine/quality/engineering yang sudah di-forward.'
             ], 400);
         }
 
@@ -160,10 +160,10 @@ class TicketingProblemController extends Controller
             'pic_technician' => $request->pic_technician,
             'diagnosis' => $request->diagnosis,
             'result_repair' => $request->result_repair,
-            'problem_received_at' => $request->problem_received_at ? Carbon::parse($request->problem_received_at, config('app.timezone')) : null,
+            // problem_received_at akan diisi otomatis saat event Receive
             'diagnosis_started_at' => $request->diagnosis_started_at ? Carbon::parse($request->diagnosis_started_at, config('app.timezone')) : null,
             'repair_started_at' => $request->repair_started_at ? Carbon::parse($request->repair_started_at, config('app.timezone')) : null,
-            'repair_completed_at' => $request->repair_completed_at ? Carbon::parse($request->repair_completed_at, config('app.timezone')) : null,
+            // repair_completed_at akan diisi otomatis saat event Feedback
             'status' => 'open',
             'created_by_user_id' => $session->id,
             'updated_by_user_id' => $session->id,

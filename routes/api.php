@@ -41,15 +41,35 @@ Route::prefix('dashboard')->group(function () {
     Route::get('/ticketing/technicians', [TicketingProblemController::class, 'getTechnicians']);
 });
 
+// Dashboard status route - accessible without Sanctum (uses custom auth)
+Route::get('dashboard/status', [DashboardController::class, 'getStatusApi']);
+
+// Problems active route - accessible without Sanctum (uses custom auth)
+Route::get('problems/active', [DashboardController::class, 'getActiveProblemsApi']);
+
+// Add new problem route - accessible without Sanctum (uses custom auth)
+Route::post('problems/add', [DashboardController::class, 'addProblem']);
+
+// Manager notifications route - accessible without Sanctum (uses custom auth)
+Route::get('problems/unresolved-manager', [DashboardController::class, 'getManagerUnresolvedProblems']);
+
+// User management routes - accessible without Sanctum (uses custom auth)
+Route::get('/users', [UserController::class, 'index']);
+Route::post('/users', [UserController::class, 'store']);
+Route::put('/users/{user}', [UserController::class, 'update']);
+Route::delete('/users/{user}', [UserController::class, 'destroy']);
+
+// Inspection tables routes - accessible without Sanctum (uses custom auth)
+Route::get('/inspection-tables', [InspectionTableController::class, 'index']);
+Route::post('/inspection-tables', [InspectionTableController::class, 'store']);
+Route::get('/inspection-tables/{inspectionTable}', [InspectionTableController::class, 'show']);
+Route::put('/inspection-tables/{inspectionTable}', [InspectionTableController::class, 'update']);
+Route::put('/inspection-tables/address/{address}', [InspectionTableController::class, 'updateByAddress']);
+Route::delete('/inspection-tables/{inspectionTable}', [InspectionTableController::class, 'destroy']);
+Route::get('/machine-status/{name}', [InspectionTableController::class, 'getMachineStatus']);
+
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/sanctum-user', [AuthController::class, 'sanctumUser']);
-    Route::get('/users', [UserController::class, 'index']);
-    Route::post('/users', [UserController::class, 'store']);
-    Route::put('/users/{user}', [UserController::class, 'update']);
-    Route::delete('/users/{user}', [UserController::class, 'destroy']);
-    Route::apiResource('/inspection-tables', InspectionTableController::class);
-    Route::get('/machine-status/{name}', [InspectionTableController::class, 'getMachineStatus']);
-    Route::get('dashboard/status', [DashboardController::class, 'getStatusApi']);
 });
 
 Route::get('/health-check', function () {
