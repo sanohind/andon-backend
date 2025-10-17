@@ -137,7 +137,7 @@ class AuthController extends Controller
             // Metode ->only() akan secara aman mengambil semua data yang kita butuhkan.
             return response()->json([
                 'valid' => true,
-                'user' => $user->only(['id', 'name', 'username', 'role', 'line_name'])
+                'user' => $user->only(['id', 'name', 'username', 'role', 'line_name', 'division'])
             ]);
 
         } catch (\Exception $e) {
@@ -209,6 +209,8 @@ class AuthController extends Controller
                     'users.username', 
                     'users.name',
                     'users.role',
+                    'users.division',
+                    'users.line_name',
                     'users.created_at',
                     'users.last_login'
                 )

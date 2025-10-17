@@ -64,6 +64,7 @@ class DashboardController extends Controller
         ];
     }
 
+
     /**
      * Check if manager can see specific line based on their division
      */
@@ -86,6 +87,7 @@ class DashboardController extends Controller
         // Get user role and division from request or session
         $userRole = $request->input('user_role') ?? $request->header('X-User-Role');
         $userDivision = $request->input('user_division') ?? $request->header('X-User-Division');
+        
         
         // Ambil SEMUA meja, karena filter akan dilakukan di frontend Node.js/EJS
         $allInspectionTables = InspectionTable::all();

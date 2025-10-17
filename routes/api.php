@@ -53,6 +53,7 @@ Route::post('problems/add', [DashboardController::class, 'addProblem']);
 // Manager notifications route - accessible without Sanctum (uses custom auth)
 Route::get('problems/unresolved-manager', [DashboardController::class, 'getManagerUnresolvedProblems']);
 
+
 // User management routes - accessible without Sanctum (uses custom auth)
 Route::get('/users', [UserController::class, 'index']);
 Route::post('/users', [UserController::class, 'store']);
