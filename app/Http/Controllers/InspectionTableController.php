@@ -72,7 +72,7 @@ class InspectionTableController extends Controller
         // Auto-insert ke production_data untuk memulai penghitungan quantity
         ProductionData::create([
             'timestamp' => Carbon::now('Asia/Jakarta'),
-            'machine_name' => $validated['name'],
+            'machine_name' => $address, // Gunakan address sebagai machine_name
             'line_name' => $validated['line_name'],
             'quantity' => 0
         ]);

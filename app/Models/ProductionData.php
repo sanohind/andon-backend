@@ -36,6 +36,14 @@ class ProductionData extends Model
     ];
 
     /**
+     * Relasi dengan InspectionTable berdasarkan address
+     */
+    public function inspectionTable()
+    {
+        return $this->belongsTo(InspectionTable::class, 'machine_name', 'address');
+    }
+
+    /**
      * Tipe data asli untuk atribut model.
      *
      * @var array<string, string>

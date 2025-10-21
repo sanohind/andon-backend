@@ -134,17 +134,27 @@ class DashboardController extends Controller
                 return $item->machine_name . '_line_' . $item->table_line_name;
             });
 
-        // Ambil data produksi terbaru dengan kombinasi machine_name dan line_name
-        $machineNames = $allInspectionTables->pluck('name')->toArray();
-        $latestProductions = ProductionData::whereIn('machine_name', $machineNames)
-            ->orderBy('timestamp', 'desc')
+        // Ambil data produksi terbaru dengan JOIN ke inspection_tables untuk mendapatkan address
+        $addresses = $allInspectionTables->pluck('address')->toArray();
+        $latestProductions = DB::table('production_data')
+            ->select([
+                'production_data.*',
+                'inspection_tables.name as machine_name',
+                'inspection_tables.line_name as table_line_name'
+            ])
+            ->join('inspection_tables', function($join) {
+                $join->on('production_data.machine_name', '=', 'inspection_tables.address')
+                     ->on('production_data.line_name', '=', 'inspection_tables.line_name');
+            })
+            ->whereIn('production_data.machine_name', $addresses)
+            ->orderBy('production_data.timestamp', 'desc')
             ->get()
             ->unique(function($item) {
                 // PERBAIKAN: Gunakan kombinasi machine_name dan line_name untuk uniqueness
-                return $item->machine_name . '_line_' . ($item->line_name ?? 'default');
+                return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
             })
             ->keyBy(function($item) {
-                return $item->machine_name . '_line_' . ($item->line_name ?? 'default');
+                return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
             });
 
         foreach ($allInspectionTables as $table) {
@@ -211,17 +221,27 @@ class DashboardController extends Controller
                 return $item->tipe_mesin . '_line_' . $item->line_name;
             });
 
-        // Ambil data produksi terbaru dengan kombinasi machine_name dan line_name
-        $machineNames = $allInspectionTables->pluck('name')->toArray();
-        $latestProductions = ProductionData::whereIn('machine_name', $machineNames)
-            ->orderBy('timestamp', 'desc')
+        // Ambil data produksi terbaru dengan JOIN ke inspection_tables untuk mendapatkan address
+        $addresses = $allInspectionTables->pluck('address')->toArray();
+        $latestProductions = DB::table('production_data')
+            ->select([
+                'production_data.*',
+                'inspection_tables.name as machine_name',
+                'inspection_tables.line_name as table_line_name'
+            ])
+            ->join('inspection_tables', function($join) {
+                $join->on('production_data.machine_name', '=', 'inspection_tables.address')
+                     ->on('production_data.line_name', '=', 'inspection_tables.line_name');
+            })
+            ->whereIn('production_data.machine_name', $addresses)
+            ->orderBy('production_data.timestamp', 'desc')
             ->get()
             ->unique(function($item) {
                 // PERBAIKAN: Gunakan kombinasi machine_name dan line_name untuk uniqueness
-                return $item->machine_name . '_line_' . ($item->line_name ?? 'default');
+                return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
             })
             ->keyBy(function($item) {
-                return $item->machine_name . '_line_' . ($item->line_name ?? 'default');
+                return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
             });
 
         foreach ($allInspectionTables as $table) {
