@@ -807,6 +807,131 @@ class DashboardController extends Controller
         ], 502);
     }
 
+    public function getPlcStatusFromDatabase()
+    {
+        try {
+            $devices = DB::table('device_status')->get();
+            
+            return response()->json([
+                'success' => true,
+                'data' => $devices
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Error fetching device status: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    public function createPlcDevice(Request $request)
+    {
+        try {
+            $request->validate([
+                'device_id' => 'required|string|max:50|unique:device_status,device_id',
+                'device_name' => 'nullable|string|max:100',
+                'status' => 'required|string|max:20',
+                'details' => 'nullable|string'
+            ]);
+
+            $deviceId = DB::table('device_status')->insertGetId([
+                'device_id' => $request->device_id,
+                'device_name' => $request->device_name,
+                'status' => $request->status,
+                'last_seen' => now(),
+                'details' => $request->details,
+                'created_at' => now(),
+                'updated_at' => now()
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'PLC device created successfully',
+                'data' => ['id' => $deviceId]
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $e->errors()
+            ], 422);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Error creating device: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    public function updatePlcDevice(Request $request, $id)
+    {
+        try {
+            $request->validate([
+                'device_id' => 'required|string|max:50|unique:device_status,device_id,' . $id,
+                'device_name' => 'nullable|string|max:100',
+                'status' => 'required|string|max:20',
+                'details' => 'nullable|string'
+            ]);
+
+            $updated = DB::table('device_status')
+                ->where('id', $id)
+                ->update([
+                    'device_id' => $request->device_id,
+                    'device_name' => $request->device_name,
+                    'status' => $request->status,
+                    'details' => $request->details,
+                    'updated_at' => now()
+                ]);
+
+            if ($updated) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'PLC device updated successfully'
+                ]);
+            } else {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Device not found'
+                ], 404);
+            }
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $e->errors()
+            ], 422);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Error updating device: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    public function deletePlcDevice($id)
+    {
+        try {
+            $deleted = DB::table('device_status')->where('id', $id)->delete();
+
+            if ($deleted) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'PLC device deleted successfully'
+                ]);
+            } else {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Device not found'
+                ], 404);
+            }
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Error deleting device: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
     public function forwardProblem(Request $request, $id)
     {
         // Ambil token dari request header

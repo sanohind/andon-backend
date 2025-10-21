@@ -73,6 +73,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/sanctum-user', [AuthController::class, 'sanctumUser']);
 });
 
+// PLC Status routes - accessible without Sanctum (uses custom auth)
+Route::get('/plc-status', [DashboardController::class, 'getPlcStatusFromDatabase']);
+Route::post('/plc-status', [DashboardController::class, 'createPlcDevice']);
+Route::put('/plc-status/{id}', [DashboardController::class, 'updatePlcDevice']);
+Route::delete('/plc-status/{id}', [DashboardController::class, 'deletePlcDevice']);
+
 Route::get('/health-check', function () {
     return response()->json(['status' => 'ok']);
 });
