@@ -79,6 +79,9 @@ Route::post('/plc-status', [DashboardController::class, 'createPlcDevice']);
 Route::put('/plc-status/{id}', [DashboardController::class, 'updatePlcDevice']);
 Route::delete('/plc-status/{id}', [DashboardController::class, 'deletePlcDevice']);
 
+// Inspection tables route for PLC monitoring
+Route::get('/inspection-tables', [DashboardController::class, 'getInspectionTables']);
+
 Route::get('/health-check', function () {
     return response()->json(['status' => 'ok']);
 });

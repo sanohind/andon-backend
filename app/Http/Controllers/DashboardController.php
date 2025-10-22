@@ -932,6 +932,27 @@ class DashboardController extends Controller
         }
     }
 
+    public function getInspectionTables()
+    {
+        try {
+            $tables = DB::table('inspection_tables')
+                ->select('id', 'name', 'line_name', 'division')
+                ->orderBy('line_name')
+                ->orderBy('name')
+                ->get();
+            
+            return response()->json([
+                'success' => true,
+                'data' => $tables
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Error fetching inspection tables: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
     public function forwardProblem(Request $request, $id)
     {
         // Ambil token dari request header
