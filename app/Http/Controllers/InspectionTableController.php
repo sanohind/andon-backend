@@ -11,14 +11,25 @@ class InspectionTableController extends Controller
 {
     public function index()
     {
-        $tables = InspectionTable::all();
-        
-        // Sort using natural order (handles numbers correctly)
-        $tables = $tables->sort(function($a, $b) {
-            return strnatcasecmp($a->name, $b->name);
-        });
-        
-        return $tables->values();
+        try {
+            $tables = InspectionTable::all();
+            
+            // Sort using natural order (handles numbers correctly)
+            $tables = $tables->sort(function($a, $b) {
+                return strnatcasecmp($a->name, $b->name);
+            });
+            
+            \Log::info('InspectionTableController::index - Found tables:', ['count' => $tables->count(), 'tables' => $tables->toArray()]);
+            
+            // Return explicit JSON response with success/data format
+            return response()->json([
+                'success' => true,
+                'data' => $tables->values()
+            ]);
+        } catch (\Exception $e) {
+            \Log::error('InspectionTableController::index - Error:', ['message' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);
+            return response()->json(['error' => 'Database error: ' . $e->getMessage()], 500);
+        }
     }
 
     public function store(Request $request)

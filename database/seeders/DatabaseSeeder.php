@@ -22,6 +22,7 @@ class DatabaseSeeder extends Seeder
 
         $this->call([
             DeviceStatusSeeder::class,
+            InspectionTableSeeder::class,
         ]);
     }
 }

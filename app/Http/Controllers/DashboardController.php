@@ -831,7 +831,8 @@ class DashboardController extends Controller
                 'device_id' => 'required|string|max:50|unique:device_status,device_id',
                 'device_name' => 'nullable|string|max:100',
                 'status' => 'required|string|max:20',
-                'details' => 'nullable|string'
+                'details' => 'nullable|string',
+                'controlled_tables' => 'nullable' // JSON string of table names
             ]);
 
             $deviceId = DB::table('device_status')->insertGetId([
@@ -840,6 +841,8 @@ class DashboardController extends Controller
                 'status' => $request->status,
                 'last_seen' => now(),
                 'details' => $request->details,
+                // Persist controlled tables as provided (frontend sends JSON string)
+                'controlled_tables' => $request->input('controlled_tables') ?: null,
                 'created_at' => now(),
                 'updated_at' => now()
             ]);
@@ -870,7 +873,8 @@ class DashboardController extends Controller
                 'device_id' => 'required|string|max:50|unique:device_status,device_id,' . $id,
                 'device_name' => 'nullable|string|max:100',
                 'status' => 'required|string|max:20',
-                'details' => 'nullable|string'
+                'details' => 'nullable|string',
+                'controlled_tables' => 'nullable' // JSON string of table names
             ]);
 
             $updated = DB::table('device_status')
@@ -880,6 +884,8 @@ class DashboardController extends Controller
                     'device_name' => $request->device_name,
                     'status' => $request->status,
                     'details' => $request->details,
+                    // Persist controlled tables as provided (frontend sends JSON string)
+                    'controlled_tables' => $request->input('controlled_tables') ?: null,
                     'updated_at' => now()
                 ]);
 
@@ -936,7 +942,7 @@ class DashboardController extends Controller
     {
         try {
             $tables = DB::table('inspection_tables')
-                ->select('id', 'name', 'line_name', 'division')
+                ->select('id', 'name', 'line_name', 'division', 'address')
                 ->orderBy('line_name')
                 ->orderBy('name')
                 ->get();
