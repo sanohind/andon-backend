@@ -8,5 +8,5 @@ class InspectionTable extends Model
 {
     use HasFactory;
     protected $table = 'inspection_tables';
-    protected $fillable = ['name', 'line_name', 'division', 'address'];
+    protected $fillable = ['name', 'line_name', 'division', 'address', 'oee'];
 }

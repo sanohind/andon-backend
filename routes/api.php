@@ -62,10 +62,13 @@ Route::delete('/users/{user}', [UserController::class, 'destroy']);
 
 // Inspection tables routes - accessible without Sanctum (uses custom auth)
 Route::get('/inspection-tables', [InspectionTableController::class, 'index']);
+Route::get('/inspection-tables/metrics', [InspectionTableController::class, 'metrics']);
 Route::post('/inspection-tables', [InspectionTableController::class, 'store']);
-Route::get('/inspection-tables/{inspectionTable}', [InspectionTableController::class, 'show']);
+Route::get('/inspection-tables/{inspectionTable}', [InspectionTableController::class, 'show'])->whereNumber('inspectionTable');
 Route::put('/inspection-tables/{inspectionTable}', [InspectionTableController::class, 'update']);
 Route::put('/inspection-tables/address/{address}', [InspectionTableController::class, 'updateByAddress']);
+Route::put('/inspection-tables/address/{address}/target', [InspectionTableController::class, 'setTarget']);
+Route::put('/inspection-tables/address/{address}/cycle', [InspectionTableController::class, 'setCycle']);
 Route::delete('/inspection-tables/{inspectionTable}', [InspectionTableController::class, 'destroy']);
 Route::get('/machine-status/{name}', [InspectionTableController::class, 'getMachineStatus']);
 

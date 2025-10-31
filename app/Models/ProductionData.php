@@ -33,6 +33,8 @@ class ProductionData extends Model
         'machine_name',
         'line_name',
         'quantity',
+        'target_quantity',
+        'cycle_time',
     ];
 
     /**
@@ -51,5 +53,7 @@ class ProductionData extends Model
     protected $casts = [
         'timestamp' => 'datetime',
         'quantity' => 'integer',
+        'target_quantity' => 'integer',
+        'cycle_time' => 'integer',
     ];
 }
