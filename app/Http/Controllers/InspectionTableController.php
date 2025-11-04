@@ -148,23 +148,15 @@ class InspectionTableController extends Controller
             return response()->json(['message' => 'Inspection table with address not found.'], 404);
         }
 
-        // Update latest production_data row for this machine (address)
-        $latest = ProductionData::where('machine_name', $address)->orderByDesc('timestamp')->first();
-        if (!$latest) {
-            $latest = ProductionData::create([
-                'timestamp' => Carbon::now('Asia/Jakarta'),
-                'machine_name' => $address,
-                'line_name' => $table->line_name,
-                'quantity' => 0,
-                'target_quantity' => $validated['target_quantity']
-            ]);
-        } else {
-            $latest->update(['target_quantity' => $validated['target_quantity']]);
-        }
+        // Update target_quantity langsung ke InspectionTable
+        $table->update(['target_quantity' => $validated['target_quantity']]);
+        $table->refresh();
 
-        // Recompute and store OEE using ACTUAL quantity when possible
-        $cycle = $latest->cycle_time;
-        $actualQuantity = $latest->quantity ?? 0;
+        // Recompute and store OEE using ACTUAL quantity from ProductionData
+        $latest = ProductionData::where('machine_name', $address)->orderByDesc('timestamp')->first();
+        $actualQuantity = $latest?->quantity ?? 0;
+        $cycle = $table->cycle_time;
+        
         if (!is_null($cycle) && $cycle > 0) {
             $oee = (($actualQuantity * $cycle) / (8 * 3600)) * 100.0;
             $table->update(['oee' => round($oee, 2)]);
@@ -172,8 +164,8 @@ class InspectionTableController extends Controller
 
         return response()->json(['success' => true, 'message' => 'Target quantity updated', 'data' => [
             'address' => $address,
-            'target_quantity' => $latest->target_quantity,
-            'cycle_time' => $latest->cycle_time,
+            'target_quantity' => $table->target_quantity,
+            'cycle_time' => $table->cycle_time,
             'oee' => $table->oee
         ]]);
     }
@@ -189,21 +181,14 @@ class InspectionTableController extends Controller
             return response()->json(['message' => 'Inspection table with address not found.'], 404);
         }
 
-        $latest = ProductionData::where('machine_name', $address)->orderByDesc('timestamp')->first();
-        if (!$latest) {
-            $latest = ProductionData::create([
-                'timestamp' => Carbon::now('Asia/Jakarta'),
-                'machine_name' => $address,
-                'line_name' => $table->line_name,
-                'quantity' => 0,
-                'cycle_time' => $validated['cycle_time']
-            ]);
-        } else {
-            $latest->update(['cycle_time' => $validated['cycle_time']]);
-        }
+        // Update cycle_time langsung ke InspectionTable
+        $table->update(['cycle_time' => $validated['cycle_time']]);
+        $table->refresh();
 
-        // Recompute and store OEE using ACTUAL quantity when possible
-        $actualQuantity = $latest->quantity ?? 0;
+        // Recompute and store OEE using ACTUAL quantity from ProductionData
+        $latest = ProductionData::where('machine_name', $address)->orderByDesc('timestamp')->first();
+        $actualQuantity = $latest?->quantity ?? 0;
+        
         if ($validated['cycle_time'] > 0) {
             $oee = (($actualQuantity * $validated['cycle_time']) / (8 * 3600)) * 100.0;
             $table->update(['oee' => round($oee, 2)]);
@@ -211,8 +196,8 @@ class InspectionTableController extends Controller
 
         return response()->json(['success' => true, 'message' => 'Cycle time updated', 'data' => [
             'address' => $address,
-            'target_quantity' => $latest->target_quantity,
-            'cycle_time' => $latest->cycle_time,
+            'target_quantity' => $table->target_quantity,
+            'cycle_time' => $table->cycle_time,
             'oee' => $table->oee
         ]]);
     }
@@ -220,12 +205,13 @@ class InspectionTableController extends Controller
     public function metrics()
     {
         // Return per-table metrics: address, target_quantity, cycle_time, oee
+        // target_quantity dan cycle_time sekarang dari InspectionTable
         $tables = InspectionTable::all();
 
         $result = $tables->map(function($t){
             $latest = ProductionData::where('machine_name', $t->address)->orderByDesc('timestamp')->first();
             $actualQty = $latest?->quantity ?? 0;
-            $cycle = $latest?->cycle_time ?? null;
+            $cycle = $t->cycle_time; // Ambil dari InspectionTable
             $oee = null;
             if (!is_null($cycle) && $cycle > 0) {
                 $oee = (($actualQty * $cycle) / (8 * 3600)) * 100.0;
@@ -234,7 +220,7 @@ class InspectionTableController extends Controller
                 'address' => $t->address,
                 'name' => $t->name,
                 'line_name' => $t->line_name,
-                'target_quantity' => $latest?->target_quantity,
+                'target_quantity' => $t->target_quantity, // Ambil dari InspectionTable
                 'cycle_time' => $cycle,
                 'oee' => is_null($oee) ? null : round($oee, 2),
             ];

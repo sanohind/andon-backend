@@ -8,5 +8,11 @@ class InspectionTable extends Model
 {
     use HasFactory;
     protected $table = 'inspection_tables';
-    protected $fillable = ['name', 'line_name', 'division', 'address', 'oee'];
+    protected $fillable = ['name', 'line_name', 'division', 'address', 'oee', 'target_quantity', 'cycle_time'];
+    
+    protected $casts = [
+        'target_quantity' => 'integer',
+        'cycle_time' => 'integer',
+        'oee' => 'decimal:2',
+    ];
 }
