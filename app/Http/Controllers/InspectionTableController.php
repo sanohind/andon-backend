@@ -115,7 +115,9 @@ class InspectionTableController extends Controller
     public function updateByAddress(Request $request, $address)
     {
         $validated = $request->validate([
-            'name' => 'required|string|max:255'
+            'name' => 'required|string|max:255',
+            'division' => 'required|string|max:50',
+            'line_name' => 'required|string|max:50'
         ]);
 
         // Find inspection table by address
@@ -125,9 +127,21 @@ class InspectionTableController extends Controller
             return response()->json(['message' => 'Inspection table with address not found.'], 404);
         }
 
-        // Update only the name
+        // Validasi unik secara manual
+        $exists = InspectionTable::where('name', $validated['name'])
+                                ->where('line_name', $validated['line_name'])
+                                ->where('id', '!=', $inspectionTable->id)
+                                ->exists();
+
+        if ($exists) {
+            return response()->json(['message' => 'Nama meja untuk line tersebut sudah ada.'], 422);
+        }
+
+        // Update name, division, and line_name
         $inspectionTable->update([
-            'name' => $validated['name']
+            'name' => $validated['name'],
+            'division' => $validated['division'],
+            'line_name' => $validated['line_name']
         ]);
 
         return response()->json([
