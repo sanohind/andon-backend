@@ -5,6 +5,7 @@ use App\Http\Controllers\Controller;
 use App\Models\InspectionTable;
 use App\Models\ProductionData;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
 
 class InspectionTableController extends Controller
@@ -170,9 +171,10 @@ class InspectionTableController extends Controller
         $latest = ProductionData::where('machine_name', $address)->orderByDesc('timestamp')->first();
         $actualQuantity = $latest?->quantity ?? 0;
         $cycle = $table->cycle_time;
+		$runningHour = 8; // Default 8 hours
         
         if (!is_null($cycle) && $cycle > 0) {
-            $oee = (($actualQuantity * $cycle) / (8 * 3600)) * 100.0;
+            $oee = (($actualQuantity * $cycle) / ($runningHour * 3600)) * 100.0;
             $table->update(['oee' => round($oee, 2)]);
         }
 
@@ -202,9 +204,10 @@ class InspectionTableController extends Controller
         // Recompute and store OEE using ACTUAL quantity from ProductionData
         $latest = ProductionData::where('machine_name', $address)->orderByDesc('timestamp')->first();
         $actualQuantity = $latest?->quantity ?? 0;
+		$runningHour = 8; // Default 8 hours
         
         if ($validated['cycle_time'] > 0) {
-            $oee = (($actualQuantity * $validated['cycle_time']) / (8 * 3600)) * 100.0;
+            $oee = (($actualQuantity * $validated['cycle_time']) / ($runningHour * 3600)) * 100.0;
             $table->update(['oee' => round($oee, 2)]);
         }
 
@@ -214,6 +217,54 @@ class InspectionTableController extends Controller
             'cycle_time' => $table->cycle_time,
             'oee' => $table->oee
         ]]);
+    }
+
+    public function setCycleThreshold(Request $request, $address)
+    {
+        try {
+            $validated = $request->validate([
+                'warning_cycle_count' => 'required|integer|min:1',
+                'problem_cycle_count' => 'required|integer|min:1|gte:warning_cycle_count'
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation error',
+                'errors' => $e->errors()
+            ], 422);
+        }
+
+        $table = InspectionTable::where('address', $address)->first();
+        if (!$table) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Inspection table with address not found.'
+            ], 404);
+        }
+
+        try {
+            // Update cycle threshold
+            $table->update([
+                'warning_cycle_count' => $validated['warning_cycle_count'],
+                'problem_cycle_count' => $validated['problem_cycle_count']
+            ]);
+
+            return response()->json([
+                'success' => true, 
+                'message' => 'Cycle threshold updated', 
+                'data' => [
+                    'address' => $address,
+                    'warning_cycle_count' => $table->warning_cycle_count,
+                    'problem_cycle_count' => $table->problem_cycle_count
+                ]
+            ]);
+        } catch (\Exception $e) {
+            \Log::error('Error updating cycle threshold: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to update cycle threshold: ' . $e->getMessage()
+            ], 500);
+        }
     }
 
     public function metrics()
@@ -226,9 +277,10 @@ class InspectionTableController extends Controller
             $latest = ProductionData::where('machine_name', $t->address)->orderByDesc('timestamp')->first();
             $actualQty = $latest?->quantity ?? 0;
             $cycle = $t->cycle_time; // Ambil dari InspectionTable
+			$runningHour = 8; // Default 8 hours
             $oee = null;
             if (!is_null($cycle) && $cycle > 0) {
-                $oee = (($actualQty * $cycle) / (8 * 3600)) * 100.0;
+                $oee = (($actualQty * $cycle) / ($runningHour * 3600)) * 100.0;
             }
             return [
                 'address' => $t->address,
@@ -243,10 +295,56 @@ class InspectionTableController extends Controller
         return response()->json(['success' => true, 'data' => $result]);
     }
 
-    public function destroy(InspectionTable $inspectionTable)
+    public function destroy($inspectionTable)
     {
-        $inspectionTable->delete();
-        return response()->json(['message' => 'Meja Inspect berhasil dihapus.']);
+        try {
+            // Handle both model binding and direct ID
+            if ($inspectionTable instanceof InspectionTable) {
+                $table = $inspectionTable;
+            } else {
+                $table = InspectionTable::find($inspectionTable);
+                if (!$table) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Meja Inspect tidak ditemukan.'
+                    ], 404);
+                }
+            }
+            
+            // Delete related part configurations first (should cascade, but doing it explicitly for safety)
+            DB::table('part_configurations')->where('address', $table->address)->delete();
+            
+            // Delete the inspection table
+            $table->delete();
+            
+            return response()->json([
+                'success' => true,
+                'message' => 'Meja Inspect berhasil dihapus.'
+            ]);
+        } catch (\Illuminate\Database\QueryException $e) {
+            // Handle foreign key constraint errors
+            if ($e->getCode() == 23000) {
+                \Log::error('Foreign key constraint error deleting inspection table: ' . $e->getMessage());
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Tidak dapat menghapus meja karena masih ada data yang terkait. Silakan hapus data terkait terlebih dahulu.'
+                ], 409);
+            }
+            \Log::error('Database error deleting inspection table: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal menghapus meja: ' . $e->getMessage()
+            ], 500);
+        } catch (\Exception $e) {
+            \Log::error('Error deleting inspection table: ' . $e->getMessage(), [
+                'table_id' => $inspectionTable instanceof InspectionTable ? $inspectionTable->id : $inspectionTable,
+                'trace' => $e->getTraceAsString()
+            ]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal menghapus meja: ' . $e->getMessage()
+            ], 500);
+        }
     }
     public function getMachineStatus(Request $request, $machineName)
     {

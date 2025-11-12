@@ -13,6 +13,11 @@ use Carbon\Carbon;
 
 class DashboardController extends Controller
 {
+    // Cache untuk cycle-based status calculation (untuk mengurangi beban sistem)
+    private static $cycleStatusCache = [];
+    private static $cycleStatusCacheTime = [];
+    private const CYCLE_STATUS_CACHE_TTL = 5; // Cache TTL dalam detik (5 detik)
+    
     private function getAllMachineNames()
     {
         // Mengambil semua record dari tabel inspection_tables
@@ -143,8 +148,8 @@ class DashboardController extends Controller
                 'inspection_tables.line_name as table_line_name'
             ])
             ->join('inspection_tables', function($join) {
-                $join->on('production_data.machine_name', '=', 'inspection_tables.address')
-                     ->on('production_data.line_name', '=', 'inspection_tables.line_name');
+                // Relax join: match by address only to tolerate missing/mismatched line_name in production_data
+                $join->on('production_data.machine_name', '=', 'inspection_tables.address');
             })
             ->whereIn('production_data.machine_name', $addresses)
             ->orderBy('production_data.timestamp', 'desc')
@@ -168,18 +173,69 @@ class DashboardController extends Controller
             // PERBAIKAN: Cari production data berdasarkan kombinasi nama mesin DAN line number
             $productionKey = $machineName . '_line_' . $lineName;
             $latestProduction = $latestProductions->get($productionKey);
+            if (!$latestProduction) {
+                // Fallback: use the first record for this machine regardless of line
+                $latestProduction = $latestProductions->first(function($item) use ($machineName) {
+                    return $item->machine_name === $machineName;
+                });
+            }
+            
+            // Additional fallback: try to find by address directly if still not found
+            if (!$latestProduction) {
+                $latestProduction = DB::table('production_data')
+                    ->where('machine_name', $table->address)
+                    ->orderBy('timestamp', 'desc')
+                    ->first();
+            }
+
+            // Check cycle-based status (warning/problem based on quantity not increasing)
+            // Use cached result if available and still valid, or if quantity hasn't changed
+            $cacheKey = $table->id . '_' . ($latestProduction ? $latestProduction->quantity : 'no_data');
+            $cycleBasedStatus = $this->checkCycleBasedStatusWithCache($table, $latestProduction, $cacheKey);
+            
+            // Determine final status: priority: activeProblem > cycleBasedProblem > cycleBasedWarning > normal
+            $finalStatus = 'normal';
+            $finalColor = 'green';
+            $problemType = null;
+            $timestamp = null;
+            
+            if ($activeProblem) {
+                // Active problem from log takes priority
+                $finalStatus = 'problem';
+                $finalColor = 'red';
+                $problemType = $activeProblem->tipe_problem;
+                $timestamp = $activeProblem->timestamp;
+            } elseif ($cycleBasedStatus['status'] === 'problem') {
+                // Cycle-based problem
+                $finalStatus = 'problem';
+                $finalColor = 'red';
+                $problemType = 'Cycle Time';
+            } elseif ($cycleBasedStatus['status'] === 'warning') {
+                // Cycle-based warning
+                $finalStatus = 'warning';
+                $finalColor = 'yellow';
+            }
 
             $statusData = [
                 'name' => $machineName,
                 'line_name' => $lineName, // TAMBAHAN: Sertakan line_name dalam response
-                'status' => $activeProblem ? 'problem' : 'normal',
-                'color' => $activeProblem ? 'red' : 'green',
-                'problem_type' => $activeProblem ? $activeProblem->tipe_problem : null,
-                'timestamp' => $activeProblem ? $activeProblem->timestamp : null,
+                'status' => $finalStatus,
+                'color' => $finalColor,
+                'problem_type' => $problemType,
+                'timestamp' => $timestamp,
                 'last_check' => Carbon::now(config('app.timezone'))->format('Y-m-d H:i:s'),
                 'quantity' => $latestProduction ? $latestProduction->quantity : 0,
-                'id' => $table->id
+                'id' => $table->id,
+                'cycle_based_status' => $cycleBasedStatus // Include cycle-based status for reference
             ];
+            
+            // Only log when status is not normal (to reduce log volume)
+            if ($finalStatus !== 'normal') {
+                \Log::info("Final status changed for {$machineName} (line: {$lineName}):", [
+                    'final_status' => $finalStatus,
+                    'cycle_based_status' => $cycleBasedStatus['status'] ?? 'normal'
+                ]);
+            }
 
             // Kelompokkan berdasarkan line_name
             if (!isset($groupedStatuses[$lineName])) {
@@ -230,8 +286,7 @@ class DashboardController extends Controller
                 'inspection_tables.line_name as table_line_name'
             ])
             ->join('inspection_tables', function($join) {
-                $join->on('production_data.machine_name', '=', 'inspection_tables.address')
-                     ->on('production_data.line_name', '=', 'inspection_tables.line_name');
+                $join->on('production_data.machine_name', '=', 'inspection_tables.address');
             })
             ->whereIn('production_data.machine_name', $addresses)
             ->orderBy('production_data.timestamp', 'desc')
@@ -256,6 +311,23 @@ class DashboardController extends Controller
             $productionKey = $machineName . '_line_' . $lineName;
             $latestProduction = $latestProductions->get($productionKey);
 
+            if (!$latestProduction) {
+                $latestProduction = $latestProductions->firstWhere('machine_name', $machineName);
+            }
+            
+            // Additional fallback: try to find by address directly if still not found
+            if (!$latestProduction) {
+                $latestProduction = DB::table('production_data')
+                    ->where('machine_name', $table->address)
+                    ->orderBy('timestamp', 'desc')
+                    ->first();
+            }
+
+            // Check cycle-based status (warning/problem based on quantity not increasing)
+            // Use cached result if available and still valid, or if quantity hasn't changed
+            $cacheKey = $table->id . '_' . ($latestProduction ? $latestProduction->quantity : 'no_data');
+            $cycleBasedStatus = $this->checkCycleBasedStatusWithCache($table, $latestProduction, $cacheKey);
+            
             // Tentukan status berdasarkan role user
             $machineStatus = 'normal';
             $problemType = null;
@@ -285,18 +357,43 @@ class DashboardController extends Controller
                     $timestamp = $activeProblem->timestamp;
                 }
             }
+            
+            // Determine final status: priority: activeProblem > cycleBasedProblem > cycleBasedWarning > normal
+            $finalStatus = $machineStatus;
+            $finalColor = $machineStatus === 'problem' ? 'red' : 'green';
+            
+            if ($machineStatus === 'normal') {
+                // Only check cycle-based status if no active problem
+                if ($cycleBasedStatus['status'] === 'problem') {
+                    $finalStatus = 'problem';
+                    $finalColor = 'red';
+                    $problemType = 'Cycle Time';
+                } elseif ($cycleBasedStatus['status'] === 'warning') {
+                    $finalStatus = 'warning';
+                    $finalColor = 'yellow';
+                }
+            }
 
             $statusData = [
                 'name' => $machineName,
                 'line_name' => $lineName,
-                'status' => $machineStatus,
-                'color' => $machineStatus === 'problem' ? 'red' : 'green',
+                'status' => $finalStatus,
+                'color' => $finalColor,
                 'problem_type' => $problemType,
                 'timestamp' => $timestamp,
                 'last_check' => Carbon::now(config('app.timezone'))->format('Y-m-d H:i:s'),
                 'quantity' => $latestProduction ? $latestProduction->quantity : 0,
-                'id' => $table->id
+                'id' => $table->id,
+                'cycle_based_status' => $cycleBasedStatus // Include cycle-based status for reference
             ];
+            
+            // Only log when status is not normal (to reduce log volume)
+            if ($finalStatus !== 'normal') {
+                \Log::info("Final status changed (role-filtered) for {$machineName} (line: {$lineName}):", [
+                    'final_status' => $finalStatus,
+                    'cycle_based_status' => $cycleBasedStatus['status'] ?? 'normal'
+                ]);
+            }
 
             // Kelompokkan berdasarkan line_name
             if (!isset($groupedStatuses[$lineName])) {
@@ -756,9 +853,62 @@ class DashboardController extends Controller
         $resolvedTodayQuery = clone $logQuery;
         $criticalProblemsQuery = clone $logQuery;
 
+        // Count active problems from log (machine problems)
+        $activeProblemsFromLog = $activeProblemsQuery->where('status', 'ON')->count();
+        
+        // Count cycle-based problems (quantity not increasing)
+        $cycleBasedProblemsCount = 0;
+        $allTables = $totalMachinesQuery->get();
+        
+        // Get latest production data for all tables
+        $addresses = $allTables->pluck('address')->toArray();
+        $latestProductions = DB::table('production_data')
+            ->select([
+                'production_data.*',
+                'inspection_tables.name as machine_name',
+                'inspection_tables.line_name as table_line_name'
+            ])
+            ->join('inspection_tables', function($join) {
+                $join->on('production_data.machine_name', '=', 'inspection_tables.address')
+                     ->on('production_data.line_name', '=', 'inspection_tables.line_name');
+            })
+            ->whereIn('production_data.machine_name', $addresses)
+            ->orderBy('production_data.timestamp', 'desc')
+            ->get()
+            ->unique(function($item) {
+                return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
+            })
+            ->keyBy(function($item) {
+                return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
+            });
+        
+        // Check each table for cycle-based problems
+        foreach ($allTables as $table) {
+            $machineName = $table->name;
+            $lineName = $table->line_name;
+            $productionKey = $machineName . '_line_' . $lineName;
+            $latestProduction = $latestProductions->get($productionKey);
+            
+            if (!$latestProduction) {
+                // Fallback: cari berdasarkan machine name saja jika data produksi tidak menemukan line yang cocok
+                $latestProduction = $latestProductions->firstWhere('machine_name', $machineName);
+            }
+
+            // Check if this table has cycle-based problem status
+            // Use cached result if available and still valid, or if quantity hasn't changed
+            $cacheKey = $table->id . '_' . ($latestProduction ? $latestProduction->quantity : 'no_data');
+            $cycleBasedStatus = $this->checkCycleBasedStatusWithCache($table, $latestProduction, $cacheKey);
+            if ($cycleBasedStatus['status'] === 'problem') {
+                $cycleBasedProblemsCount++;
+            }
+        }
+        
+        // Total active problems = log problems + cycle-based problems
+        $totalActiveProblems = $activeProblemsFromLog + $cycleBasedProblemsCount;
+
         $stats = [
             'total_machines' => $totalMachinesQuery->count(),
-            'active_problems' => $activeProblemsQuery->where('status', 'ON')->count(),
+            'active_problems' => $totalActiveProblems,
             'resolved_today' => $resolvedTodayQuery->where('status', 'OFF')
                                                 ->whereDate('resolved_at', \Carbon\Carbon::today($userTimezone))
                                                 ->count(),
@@ -1579,5 +1729,222 @@ class DashboardController extends Controller
                 'error' => $e->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * Check cycle-based status with caching to reduce system load
+     * Only recalculate if cache expired or quantity changed
+     * Real-time updates only when status changes (not for cycle count calculation)
+     */
+    private function checkCycleBasedStatusWithCache($table, $latestProduction, $cacheKey)
+    {
+        $now = time();
+        
+        // Check if we have cached result and it's still valid
+        if (isset(self::$cycleStatusCache[$cacheKey]) && isset(self::$cycleStatusCacheTime[$cacheKey])) {
+            $cacheAge = $now - self::$cycleStatusCacheTime[$cacheKey];
+            $cachedStatus = self::$cycleStatusCache[$cacheKey];
+            
+            // If cache is still valid (within TTL), return cached result
+            // This reduces system load by not recalculating every second
+            if ($cacheAge < self::CYCLE_STATUS_CACHE_TTL) {
+                return $cachedStatus;
+            }
+            
+            // Cache expired - recalculate to check for status changes
+            // This ensures status changes are detected within TTL period
+        }
+        
+        // Cache expired or doesn't exist - calculate fresh
+        $result = $this->checkCycleBasedStatus($table, $latestProduction);
+        
+        // Check if status changed - if so, log it
+        if (isset(self::$cycleStatusCache[$cacheKey])) {
+            $oldStatus = self::$cycleStatusCache[$cacheKey]['status'];
+            $newStatus = $result['status'];
+            if ($oldStatus !== $newStatus) {
+                \Log::info("Cycle-based status changed for {$table->name}: {$oldStatus} -> {$newStatus}");
+            }
+        }
+        
+        // Store in cache
+        self::$cycleStatusCache[$cacheKey] = $result;
+        self::$cycleStatusCacheTime[$cacheKey] = $now;
+        
+        // Clean old cache entries (keep only last 100 entries to prevent memory leak)
+        if (count(self::$cycleStatusCache) > 100) {
+            $oldestKey = array_key_first(self::$cycleStatusCache);
+            unset(self::$cycleStatusCache[$oldestKey]);
+            unset(self::$cycleStatusCacheTime[$oldestKey]);
+        }
+        
+        return $result;
+    }
+    
+    /**
+     * Check cycle-based status (warning/problem) based on quantity not increasing
+     */
+    private function checkCycleBasedStatus($table, $latestProduction)
+    {
+        // Default return if cycle thresholds are not set
+        $defaultStatus = [
+            'status' => 'normal',
+            'cycles_without_increase' => 0,
+            'last_increase_timestamp' => null
+        ];
+
+        // Reduced logging - only log when status changes or for debugging
+        // Remove verbose logging to reduce system load
+
+        // If cycle thresholds are not set, return normal
+        if (!$table->warning_cycle_count || !$table->problem_cycle_count || !$table->cycle_time || $table->cycle_time <= 0) {
+            return $defaultStatus;
+        }
+
+        // If no production data, return normal
+        if (!$latestProduction) {
+            return $defaultStatus;
+        }
+
+        $currentQuantity = (int)$latestProduction->quantity;
+        $currentTimestamp = Carbon::parse($latestProduction->timestamp, config('app.timezone'));
+        
+        // Get production history with fallback for records without line_name
+        $productionQuery = ProductionData::where('machine_name', $table->address);
+
+        if (!empty($table->line_name)) {
+            $productionQuery->where(function($query) use ($table) {
+                $query->where('line_name', $table->line_name)
+                      ->orWhereNull('line_name');
+            });
+        }
+
+        // Ambil maksimal 200 data terbaru lalu urutkan ascending untuk analisis
+        $productionHistory = $productionQuery
+            ->orderBy('timestamp', 'desc')
+            ->limit(200)
+            ->get()
+            ->reverse()
+            ->values();
+
+        if ($productionHistory->count() === 0) {
+            return $defaultStatus;
+        }
+
+        // Determine the timestamp since quantity last increased to the current value
+        // Strategy:
+        // - Walk from latest backward; find the first record where quantity != currentQuantity.
+        // - The last increase time is the timestamp of the next record after that (first occurrence of currentQuantity streak).
+        // - If all recent records have the same quantity (no diff found), search beyond the window to find the last change.
+        $lastIncreaseTimestamp = null;
+        $indexOfChange = null;
+        
+        // First, try to find change within the current window
+        for ($i = $productionHistory->count() - 1; $i >= 0; $i--) {
+            $q = (int)$productionHistory[$i]->quantity;
+            if ($q !== $currentQuantity) {
+                $indexOfChange = $i;
+                break;
+            }
+        }
+        
+        if ($indexOfChange !== null) {
+            // Next record after change is the first with the currentQuantity
+            $firstCurrentIndex = $indexOfChange + 1;
+            if ($firstCurrentIndex < $productionHistory->count()) {
+                $lastIncreaseTimestamp = Carbon::parse($productionHistory[$firstCurrentIndex]->timestamp, config('app.timezone'));
+            }
+        } else {
+            // No change found within the window: search for the last record with different quantity
+            // This handles the case where quantity hasn't changed in the last 200 records
+            $lastDifferentQuantity = ProductionData::where('machine_name', $table->address)
+                ->where('quantity', '!=', $currentQuantity)
+                ->when(!empty($table->line_name), function($query) use ($table) {
+                    $query->where(function($q) use ($table) {
+                        $q->where('line_name', $table->line_name)
+                          ->orWhereNull('line_name');
+                    });
+                })
+                ->orderBy('timestamp', 'desc')
+                ->first();
+            
+            if ($lastDifferentQuantity) {
+                // Find the first record with currentQuantity after the last different quantity
+                $firstCurrentQuantityRecord = ProductionData::where('machine_name', $table->address)
+                    ->where('quantity', $currentQuantity)
+                    ->when(!empty($table->line_name), function($query) use ($table) {
+                        $query->where(function($q) use ($table) {
+                            $q->where('line_name', $table->line_name)
+                              ->orWhereNull('line_name');
+                        });
+                    })
+                    ->where('timestamp', '>', $lastDifferentQuantity->timestamp)
+                    ->orderBy('timestamp', 'asc')
+                    ->first();
+                
+                if ($firstCurrentQuantityRecord) {
+                    $lastIncreaseTimestamp = Carbon::parse($firstCurrentQuantityRecord->timestamp, config('app.timezone'));
+                } else {
+                    // If no record found after last different quantity, use the oldest record in window
+                    $oldest = $productionHistory->first();
+                    $lastIncreaseTimestamp = Carbon::parse($oldest->timestamp, config('app.timezone'));
+                }
+            } else {
+                // No different quantity found at all: use the oldest record's timestamp in the window
+                $oldest = $productionHistory->first();
+                $lastIncreaseTimestamp = Carbon::parse($oldest->timestamp, config('app.timezone'));
+            }
+        }
+
+        // Validate that lastIncreaseTimestamp is set
+        if (!$lastIncreaseTimestamp) {
+            $lastIncreaseTimestamp = $currentTimestamp;
+        }
+        
+        // Calculate time elapsed since last increase (use current time, not latest production timestamp)
+        $now = Carbon::now(config('app.timezone'));
+        
+        // Ensure both timestamps are Carbon instances
+        if (!$lastIncreaseTimestamp instanceof Carbon) {
+            $lastIncreaseTimestamp = Carbon::parse($lastIncreaseTimestamp, config('app.timezone'));
+        }
+        
+        // Use diffInRealSeconds with absolute to ensure positive value
+        $timeElapsedSeconds = abs($now->diffInRealSeconds($lastIncreaseTimestamp));
+        
+        // Calculate how many cycle times have passed
+        $cycleTimeSeconds = $table->cycle_time;
+        $cyclesElapsed = $cycleTimeSeconds > 0 ? ($timeElapsedSeconds / $cycleTimeSeconds) : 0;
+
+        // Determine status based on cycle counts
+        // Use >= for comparison to trigger status change immediately when threshold is reached
+        $status = 'normal';
+        if ($cyclesElapsed >= $table->problem_cycle_count) {
+            $status = 'problem';
+        } elseif ($cyclesElapsed >= $table->warning_cycle_count) {
+            $status = 'warning';
+        }
+
+        // Only log when status is not normal (to reduce log volume)
+        if ($status !== 'normal') {
+            \Log::info("Cycle-based status changed for {$table->name} (address: {$table->address}):", [
+                'status' => $status,
+                'cycles_elapsed' => round($cyclesElapsed, 2),
+                'warning_threshold' => $table->warning_cycle_count,
+                'problem_threshold' => $table->problem_cycle_count,
+                'time_elapsed_seconds' => $timeElapsedSeconds
+            ]);
+        }
+
+        return [
+            'status' => $status,
+            'cycles_without_increase' => floor($cyclesElapsed),
+            'cycles_elapsed' => round($cyclesElapsed, 2), // Add precise cycles elapsed for debugging
+            'last_increase_timestamp' => $lastIncreaseTimestamp ? $lastIncreaseTimestamp->format('Y-m-d H:i:s') : null,
+            'current_quantity' => $currentQuantity,
+            'warning_threshold' => $table->warning_cycle_count,
+            'problem_threshold' => $table->problem_cycle_count,
+            'time_elapsed_seconds' => $timeElapsedSeconds // Add for debugging
+        ];
     }
 }

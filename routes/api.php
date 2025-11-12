@@ -6,6 +6,7 @@ use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\InspectionTableController;
 use App\Http\Controllers\TicketingProblemController;
+use App\Http\Controllers\PartConfigurationController;
 
 // Auth Routes - TANPA PREFIX AUTH
 Route::post('/login', [AuthController::class, 'login']);
@@ -69,8 +70,17 @@ Route::put('/inspection-tables/{inspectionTable}', [InspectionTableController::c
 Route::put('/inspection-tables/address/{address}', [InspectionTableController::class, 'updateByAddress']);
 Route::put('/inspection-tables/address/{address}/target', [InspectionTableController::class, 'setTarget']);
 Route::put('/inspection-tables/address/{address}/cycle', [InspectionTableController::class, 'setCycle']);
-Route::delete('/inspection-tables/{inspectionTable}', [InspectionTableController::class, 'destroy']);
+Route::put('/inspection-tables/address/{address}/cycle-threshold', [InspectionTableController::class, 'setCycleThreshold']);
+Route::delete('/inspection-tables/{inspectionTable}', [InspectionTableController::class, 'destroy'])->whereNumber('inspectionTable');
 Route::get('/machine-status/{name}', [InspectionTableController::class, 'getMachineStatus']);
+
+// Part configurations routes - accessible without Sanctum (uses custom auth)
+Route::get('/part-configurations', [PartConfigurationController::class, 'index']);
+Route::post('/part-configurations', [PartConfigurationController::class, 'store']);
+Route::post('/part-configurations/bulk-import', [PartConfigurationController::class, 'bulkImport']);
+Route::get('/part-configurations/{id}', [PartConfigurationController::class, 'show']);
+Route::put('/part-configurations/{id}', [PartConfigurationController::class, 'update']);
+Route::delete('/part-configurations/{id}', [PartConfigurationController::class, 'destroy']);
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/sanctum-user', [AuthController::class, 'sanctumUser']);
