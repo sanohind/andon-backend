@@ -69,6 +69,124 @@ class DashboardController extends Controller
         ];
     }
 
+    /**
+     * Get divisions and lines with machine counts and active problems
+     */
+    public function getDivisionsAndLines(Request $request)
+    {
+        try {
+            $userRole = $request->input('user_role') ?? $request->header('X-User-Role');
+            $userDivision = $request->input('user_division') ?? $request->header('X-User-Division');
+            
+            $mapping = $this->getDivisionLineMapping();
+            
+            // Determine which divisions to show
+            $divisionsToShow = [];
+            if (in_array($userRole, ['admin', 'maintenance', 'quality', 'engineering'])) {
+                // Show all divisions
+                $divisionsToShow = array_keys($mapping);
+            } elseif ($userRole === 'manager' && $userDivision) {
+                // Show only manager's division
+                $divisionsToShow = [$userDivision];
+            } else {
+                // Default: show all if role not recognized
+                $divisionsToShow = array_keys($mapping);
+            }
+            
+            $result = [];
+            
+            foreach ($divisionsToShow as $division) {
+                $lines = $mapping[$division] ?? [];
+                $divisionData = [
+                    'name' => $division,
+                    'lines' => []
+                ];
+                
+                foreach ($lines as $lineName) {
+                    // Count total machines for this line
+                    $totalMachines = InspectionTable::where('line_name', $lineName)->count();
+                    
+                    // Count active problems for this line
+                    // From log table
+                    $activeProblemsFromLog = DB::table('log')
+                        ->join('inspection_tables', function($join) {
+                            $join->on('log.tipe_mesin', '=', 'inspection_tables.address')
+                                 ->on('log.line_name', '=', 'inspection_tables.line_name');
+                        })
+                        ->where('log.status', 'ON')
+                        ->where('inspection_tables.line_name', $lineName)
+                        ->count();
+                    
+                    // Count cycle-based problems for this line
+                    $tables = InspectionTable::where('line_name', $lineName)->get();
+                    $addresses = $tables->pluck('address')->toArray();
+                    
+                    $cycleBasedProblemsCount = 0;
+                    if (!empty($addresses)) {
+                        $latestProductions = DB::table('production_data')
+                            ->select([
+                                'production_data.*',
+                                'inspection_tables.name as machine_name',
+                                'inspection_tables.line_name as table_line_name'
+                            ])
+                            ->join('inspection_tables', function($join) {
+                                $join->on('production_data.machine_name', '=', 'inspection_tables.address')
+                                     ->on('production_data.line_name', '=', 'inspection_tables.line_name');
+                            })
+                            ->whereIn('production_data.machine_name', $addresses)
+                            ->orderBy('production_data.timestamp', 'desc')
+                            ->get()
+                            ->unique(function($item) {
+                                return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
+                            })
+                            ->keyBy(function($item) {
+                                return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
+                            });
+                        
+                        foreach ($tables as $table) {
+                            $machineName = $table->name;
+                            $lineNameTable = $table->line_name;
+                            $productionKey = $machineName . '_line_' . $lineNameTable;
+                            $latestProduction = $latestProductions->get($productionKey);
+                            
+                            if (!$latestProduction) {
+                                $latestProduction = $latestProductions->firstWhere('machine_name', $machineName);
+                            }
+                            
+                            $cacheKey = $table->id . '_' . ($latestProduction ? $latestProduction->quantity : 'no_data');
+                            $cycleBasedStatus = $this->checkCycleBasedStatusWithCache($table, $latestProduction, $cacheKey);
+                            if ($cycleBasedStatus['status'] === 'problem') {
+                                $cycleBasedProblemsCount++;
+                            }
+                        }
+                    }
+                    
+                    $totalActiveProblems = $activeProblemsFromLog + $cycleBasedProblemsCount;
+                    
+                    $divisionData['lines'][] = [
+                        'name' => $lineName,
+                        'total_machines' => $totalMachines,
+                        'active_problems' => $totalActiveProblems
+                    ];
+                }
+                
+                $result[] = $divisionData;
+            }
+            
+            return response()->json([
+                'success' => true,
+                'data' => $result
+            ]);
+            
+        } catch (\Exception $e) {
+            \Log::error('Error getting divisions and lines: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Error getting divisions and lines: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
 
     /**
      * Check if manager can see specific line based on their division

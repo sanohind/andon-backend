@@ -48,6 +48,9 @@ Route::get('dashboard/status', [DashboardController::class, 'getStatusApi']);
 // Problems active route - accessible without Sanctum (uses custom auth)
 Route::get('problems/active', [DashboardController::class, 'getActiveProblemsApi']);
 
+// Divisions and lines route - accessible without Sanctum (uses custom auth)
+Route::get('divisions-lines', [DashboardController::class, 'getDivisionsAndLines']);
+
 // Add new problem route - accessible without Sanctum (uses custom auth)
 Route::post('problems/add', [DashboardController::class, 'addProblem']);
 
