@@ -152,52 +152,77 @@ class AnalyticsController extends Controller
         ];
 
         foreach ($problems as $problem) {
-            $activeTime = Carbon::parse($problem->timestamp);
-            $resolvedTime = Carbon::parse($problem->resolved_at);
+            // Parse semua timestamp dengan timezone yang sama (dari config)
+            $appTimezone = config('app.timezone', 'Asia/Jakarta');
+            
+            // Pastikan semua timestamp diparse dengan timezone yang sama
+            $activeTime = Carbon::parse($problem->timestamp)->setTimezone($appTimezone);
+            $resolvedTime = Carbon::parse($problem->resolved_at)->setTimezone($appTimezone);
+
+            // Validasi bahwa resolved_at harus setelah timestamp
+            if ($resolvedTime->lt($activeTime)) {
+                continue; // Skip jika data tidak valid
+            }
 
             // 1. Durasi dari Active hingga Receive (jika ada)
             if ($problem->is_received && $problem->received_at) {
-                $receiveTime = Carbon::parse($problem->received_at);
-                $activeToReceive = $receiveTime->diffInSeconds($activeTime);
-                $metrics['active_to_receive'][] = [
-                    'problem_id' => $problem->id,
-                    'machine' => $problem->tipe_mesin,
-                    'problem_type' => $problem->tipe_problem,
-                    'duration_seconds' => $activeToReceive,
-                    'duration_formatted' => $this->formatDuration($activeToReceive)
-                ];
+                $receiveTime = Carbon::parse($problem->received_at)->setTimezone($appTimezone);
+                
+                // Validasi urutan waktu: activeTime <= receiveTime <= resolvedTime
+                if ($receiveTime->gte($activeTime) && $receiveTime->lte($resolvedTime)) {
+                    // Gunakan waktu yang lebih besar dikurangi waktu yang lebih kecil
+                    $activeToReceive = abs($receiveTime->diffInSeconds($activeTime));
+                    
+                    $metrics['active_to_receive'][] = [
+                        'problem_id' => $problem->id,
+                        'machine' => $problem->tipe_mesin,
+                        'problem_type' => $problem->tipe_problem,
+                        'duration_seconds' => $activeToReceive,
+                        'duration_formatted' => $this->formatDuration($activeToReceive)
+                    ];
+                }
             }
 
             // 2. Durasi dari Receive hingga Feedback (jika ada)
             if ($problem->is_received && $problem->has_feedback_resolved && 
                 $problem->received_at && $problem->feedback_resolved_at) {
-                $receiveTime = Carbon::parse($problem->received_at);
-                $feedbackTime = Carbon::parse($problem->feedback_resolved_at);
-                $receiveToFeedback = $feedbackTime->diffInSeconds($receiveTime);
-                $metrics['receive_to_feedback'][] = [
-                    'problem_id' => $problem->id,
-                    'machine' => $problem->tipe_mesin,
-                    'problem_type' => $problem->tipe_problem,
-                    'duration_seconds' => $receiveToFeedback,
-                    'duration_formatted' => $this->formatDuration($receiveToFeedback)
-                ];
+                $receiveTime = Carbon::parse($problem->received_at)->setTimezone($appTimezone);
+                $feedbackTime = Carbon::parse($problem->feedback_resolved_at)->setTimezone($appTimezone);
+                
+                // Validasi urutan waktu: receiveTime <= feedbackTime <= resolvedTime
+                if ($feedbackTime->gte($receiveTime) && $feedbackTime->lte($resolvedTime)) {
+                    $receiveToFeedback = abs($feedbackTime->diffInSeconds($receiveTime));
+                    
+                    $metrics['receive_to_feedback'][] = [
+                        'problem_id' => $problem->id,
+                        'machine' => $problem->tipe_mesin,
+                        'problem_type' => $problem->tipe_problem,
+                        'duration_seconds' => $receiveToFeedback,
+                        'duration_formatted' => $this->formatDuration($receiveToFeedback)
+                    ];
+                }
             }
 
             // 3. Durasi dari Feedback hingga Final Resolved (jika ada)
             if ($problem->has_feedback_resolved && $problem->feedback_resolved_at) {
-                $feedbackTime = Carbon::parse($problem->feedback_resolved_at);
-                $feedbackToFinal = $resolvedTime->diffInSeconds($feedbackTime);
-                $metrics['feedback_to_final'][] = [
-                    'problem_id' => $problem->id,
-                    'machine' => $problem->tipe_mesin,
-                    'problem_type' => $problem->tipe_problem,
-                    'duration_seconds' => $feedbackToFinal,
-                    'duration_formatted' => $this->formatDuration($feedbackToFinal)
-                ];
+                $feedbackTime = Carbon::parse($problem->feedback_resolved_at)->setTimezone($appTimezone);
+                
+                // Validasi urutan waktu: feedbackTime <= resolvedTime
+                if ($resolvedTime->gte($feedbackTime)) {
+                    $feedbackToFinal = abs($resolvedTime->diffInSeconds($feedbackTime));
+                    
+                    $metrics['feedback_to_final'][] = [
+                        'problem_id' => $problem->id,
+                        'machine' => $problem->tipe_mesin,
+                        'problem_type' => $problem->tipe_problem,
+                        'duration_seconds' => $feedbackToFinal,
+                        'duration_formatted' => $this->formatDuration($feedbackToFinal)
+                    ];
+                }
             }
 
-            // 4. Total durasi resolusi
-            $totalDuration = $resolvedTime->diffInSeconds($activeTime);
+            // 4. Total durasi resolusi (selalu dihitung karena sudah divalidasi di atas)
+            $totalDuration = abs($resolvedTime->diffInSeconds($activeTime));
             $metrics['total_resolution'][] = [
                 'problem_id' => $problem->id,
                 'machine' => $problem->tipe_mesin,
@@ -239,16 +264,38 @@ class AnalyticsController extends Controller
             if ($stage === 'summary') continue;
             
             if (!empty($data)) {
-                $durations = array_column($data, 'duration_seconds');
-                $summary[$stage] = [
-                    'count' => count($durations),
-                    'average_seconds' => round(array_sum($durations) / count($durations), 2),
-                    'min_seconds' => min($durations),
-                    'max_seconds' => max($durations),
-                    'average_formatted' => $this->formatDuration(round(array_sum($durations) / count($durations))),
-                    'min_formatted' => $this->formatDuration(min($durations)),
-                    'max_formatted' => $this->formatDuration(max($durations))
-                ];
+                // Ambil semua duration dan filter hanya nilai positif
+                $durations = array_filter(
+                    array_column($data, 'duration_seconds'),
+                    function($value) {
+                        return $value >= 0; // Hanya ambil nilai positif atau nol
+                    }
+                );
+                
+                // Jika masih ada data valid setelah filter
+                if (!empty($durations)) {
+                    $durations = array_values($durations); // Re-index array
+                    $summary[$stage] = [
+                        'count' => count($durations),
+                        'average_seconds' => round(array_sum($durations) / count($durations), 2),
+                        'min_seconds' => min($durations),
+                        'max_seconds' => max($durations),
+                        'average_formatted' => $this->formatDuration(round(array_sum($durations) / count($durations))),
+                        'min_formatted' => $this->formatDuration(min($durations)),
+                        'max_formatted' => $this->formatDuration(max($durations))
+                    ];
+                } else {
+                    // Jika semua data invalid, set ke default
+                    $summary[$stage] = [
+                        'count' => 0,
+                        'average_seconds' => 0,
+                        'min_seconds' => 0,
+                        'max_seconds' => 0,
+                        'average_formatted' => 'N/A',
+                        'min_formatted' => 'N/A',
+                        'max_formatted' => 'N/A'
+                    ];
+                }
             } else {
                 $summary[$stage] = [
                     'count' => 0,
@@ -435,7 +482,44 @@ class AnalyticsController extends Controller
             ->whereBetween('created_at', [$startDate, $endDate])
             ->orderBy('created_at', 'desc')
             ->get()
-            ->map(function($ticketing) {
+            ->map(function($ticketing) use ($appTimezone) {
+                // Hitung ulang nilai-nilai menggunakan helper methods
+                $problemReceivedAtStr = $this->calculateProblemReceivedAt($ticketing, $appTimezone);
+                $downtimeSeconds = $this->calculateDowntimeForTicketing($ticketing, $appTimezone);
+                $mttrSeconds = $this->calculateMTTRForTicketing($ticketing, $appTimezone);
+                $mttdSeconds = $this->calculateMTTDForTicketing($ticketing, $appTimezone);
+                
+                // Format durations
+                $formatDuration = function($seconds) {
+                    if ($seconds === null || $seconds <= 0) {
+                        return '-';
+                    }
+                    $minutes = round($seconds / 60);
+                    if ($minutes < 1) {
+                        return '< 1 menit';
+                    } elseif ($minutes < 60) {
+                        return $minutes . ' menit';
+                    } else {
+                        $hours = floor($minutes / 60);
+                        $remainingMinutes = $minutes % 60;
+                        if ($remainingMinutes == 0) {
+                            return $hours . ' jam';
+                        } else {
+                            return $hours . ' jam ' . $remainingMinutes . ' menit';
+                        }
+                    }
+                };
+                
+                // Format problem received at
+                $formattedProblemReceivedAt = null;
+                if ($problemReceivedAtStr) {
+                    try {
+                        $formattedProblemReceivedAt = Carbon::parse($problemReceivedAtStr)->format('d/m/Y H:i:s');
+                    } catch (\Exception $e) {
+                        $formattedProblemReceivedAt = null;
+                    }
+                }
+                
                 return [
                     'id' => $ticketing->id,
                     'problem_id' => $ticketing->problem_id,
@@ -449,7 +533,7 @@ class AnalyticsController extends Controller
                     'status_label' => $ticketing->status_label,
                     'status_badge_class' => $ticketing->status_badge_class,
                     'timestamps' => [
-                        'problem_received_at' => $ticketing->formatted_problem_received_at,
+                        'problem_received_at' => $formattedProblemReceivedAt,
                         'diagnosis_started_at' => $ticketing->formatted_diagnosis_started_at,
                         'repair_started_at' => $ticketing->formatted_repair_started_at,
                         'repair_completed_at' => $ticketing->formatted_repair_completed_at,
@@ -457,15 +541,15 @@ class AnalyticsController extends Controller
                         'updated_at' => $ticketing->updated_at->format('d/m/Y H:i:s'),
                     ],
                     'durations' => [
-                        'downtime' => $ticketing->formatted_downtime,
-                        'mttr' => $ticketing->formatted_mttr,
-                        'mttd' => $ticketing->formatted_mttd,
+                        'downtime' => $formatDuration($downtimeSeconds ?? $ticketing->downtime_seconds),
+                        'mttr' => $formatDuration($mttrSeconds ?? $ticketing->mttr_seconds),
+                        'mttd' => $formatDuration($mttdSeconds ?? $ticketing->mttd_seconds),
                         'mtbf' => $ticketing->formatted_mtbf,
                     ],
                     'durations_seconds' => [
-                        'downtime_seconds' => $ticketing->downtime_seconds,
-                        'mttr_seconds' => $ticketing->mttr_seconds,
-                        'mttd_seconds' => $ticketing->mttd_seconds,
+                        'downtime_seconds' => $downtimeSeconds ?? $ticketing->downtime_seconds,
+                        'mttr_seconds' => $mttrSeconds ?? $ticketing->mttr_seconds,
+                        'mttd_seconds' => $mttdSeconds ?? $ticketing->mttd_seconds,
                         'mtbf_seconds' => $ticketing->mtbf_seconds,
                     ],
                     'users' => [
@@ -483,5 +567,121 @@ class AnalyticsController extends Controller
                 'count' => $ticketingData->count()
             ]
         ]);
+    }
+
+    /**
+     * Debug endpoint untuk melihat data mentah ticketing
+     */
+    public function getTicketingAnalyticsDataDebug(Request $request)
+    {
+        $request->validate([
+            'start_date' => 'required|date_format:Y-m-d',
+            'end_date' => 'required|date_format:Y-m-d',
+        ]);
+
+        $appTimezone = config('app.timezone');
+        $startDate = Carbon::parse($request->start_date, $appTimezone)->startOfDay()->utc();
+        $endDate = Carbon::parse($request->end_date, $appTimezone)->endOfDay()->utc();
+
+        $ticketingData = TicketingProblem::with(['problem', 'createdByUser', 'updatedByUser'])
+            ->whereBetween('created_at', [$startDate, $endDate])
+            ->orderBy('created_at', 'desc')
+            ->get()
+            ->map(function($ticketing) use ($appTimezone) {
+                return [
+                    'id' => $ticketing->id,
+                    'problem_id' => $ticketing->problem_id,
+                    'raw_data' => [
+                        'problem_received_at' => $ticketing->problem_received_at ? $ticketing->problem_received_at->format('Y-m-d H:i:s') : null,
+                        'diagnosis_started_at' => $ticketing->diagnosis_started_at ? $ticketing->diagnosis_started_at->format('Y-m-d H:i:s') : null,
+                        'repair_started_at' => $ticketing->repair_started_at ? $ticketing->repair_started_at->format('Y-m-d H:i:s') : null,
+                        'repair_completed_at' => $ticketing->repair_completed_at ? $ticketing->repair_completed_at->format('Y-m-d H:i:s') : null,
+                        'downtime_seconds' => $ticketing->downtime_seconds,
+                        'mttr_seconds' => $ticketing->mttr_seconds,
+                        'mttd_seconds' => $ticketing->mttd_seconds,
+                    ],
+                    'problem_data' => $ticketing->problem ? [
+                        'received_at' => $ticketing->problem->received_at ? $ticketing->problem->received_at->format('Y-m-d H:i:s') : null,
+                        'timestamp' => $ticketing->problem->timestamp ? $ticketing->problem->timestamp->format('Y-m-d H:i:s') : null,
+                    ] : null,
+                    'metadata' => $ticketing->metadata,
+                    'calculated' => [
+                        'problem_received_at' => $this->calculateProblemReceivedAt($ticketing, $appTimezone),
+                        'downtime_seconds' => $this->calculateDowntimeForTicketing($ticketing, $appTimezone),
+                        'mttr_seconds' => $this->calculateMTTRForTicketing($ticketing, $appTimezone),
+                        'mttd_seconds' => $this->calculateMTTDForTicketing($ticketing, $appTimezone),
+                    ]
+                ];
+            });
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'ticketing' => $ticketingData,
+                'count' => $ticketingData->count()
+            ]
+        ]);
+    }
+
+    private function calculateProblemReceivedAt($ticketing, $appTimezone)
+    {
+        if ($ticketing->problem_received_at) {
+            return $ticketing->problem_received_at->format('Y-m-d H:i:s');
+        }
+        if ($ticketing->problem && $ticketing->problem->received_at) {
+            return $ticketing->problem->received_at->format('Y-m-d H:i:s');
+        }
+        if ($ticketing->metadata && isset($ticketing->metadata['problem_received_at'])) {
+            return $ticketing->metadata['problem_received_at'];
+        }
+        return null;
+    }
+
+    private function calculateDowntimeForTicketing($ticketing, $appTimezone)
+    {
+        $repairStarted = $ticketing->repair_started_at ? Carbon::parse($ticketing->repair_started_at)->setTimezone($appTimezone) : null;
+        $repairCompleted = $ticketing->repair_completed_at ? Carbon::parse($ticketing->repair_completed_at)->setTimezone($appTimezone) : null;
+        
+        if ($repairStarted && $repairCompleted && $repairCompleted->gt($repairStarted)) {
+            return abs($repairStarted->diffInSeconds($repairCompleted));
+        }
+        
+        if ($ticketing->problem && $ticketing->problem->timestamp && $repairCompleted) {
+            $problemTimestamp = Carbon::parse($ticketing->problem->timestamp)->setTimezone($appTimezone);
+            if ($repairCompleted->gt($problemTimestamp)) {
+                return abs($problemTimestamp->diffInSeconds($repairCompleted));
+            }
+        }
+        
+        return null;
+    }
+
+    private function calculateMTTRForTicketing($ticketing, $appTimezone)
+    {
+        $repairStarted = $ticketing->repair_started_at ? Carbon::parse($ticketing->repair_started_at)->setTimezone($appTimezone) : null;
+        $repairCompleted = $ticketing->repair_completed_at ? Carbon::parse($ticketing->repair_completed_at)->setTimezone($appTimezone) : null;
+        
+        if ($repairStarted && $repairCompleted && $repairCompleted->gt($repairStarted)) {
+            return abs($repairStarted->diffInSeconds($repairCompleted));
+        }
+        
+        return null;
+    }
+
+    private function calculateMTTDForTicketing($ticketing, $appTimezone)
+    {
+        $problemReceivedAt = $this->calculateProblemReceivedAt($ticketing, $appTimezone);
+        if (!$problemReceivedAt) {
+            return null;
+        }
+        
+        $received = Carbon::parse($problemReceivedAt)->setTimezone($appTimezone);
+        $diagnosisStarted = $ticketing->diagnosis_started_at ? Carbon::parse($ticketing->diagnosis_started_at)->setTimezone($appTimezone) : null;
+        
+        if ($diagnosisStarted && $diagnosisStarted->gt($received)) {
+            return abs($received->diffInSeconds($diagnosisStarted));
+        }
+        
+        return null;
     }
 }

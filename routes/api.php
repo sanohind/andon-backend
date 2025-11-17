@@ -1,5 +1,6 @@
 <?php
 
+use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\AnalyticsController;
@@ -20,10 +21,12 @@ Route::prefix('dashboard')->group(function () {
     Route::get('/problem/{id}', [DashboardController::class, 'getProblemDetail']);
     Route::patch('/problem/{id}/status', [DashboardController::class, 'updateProblemStatus']);
     Route::get('/stats', [DashboardController::class, 'getDashboardStats']);
-    Route::get('/analytics', [AnalyticsController::class, 'getAnalyticsData']);
+    // Analytics routes - specific routes first to avoid route conflicts
     Route::get('/analytics/duration', [AnalyticsController::class, 'getProblemDurationAnalytics']);
     Route::get('/analytics/detailed-forward', [AnalyticsController::class, 'getDetailedForwardAnalyticsData']);
     Route::get('/analytics/ticketing', [AnalyticsController::class, 'getTicketingAnalyticsData']);
+    Route::get('/analytics/ticketing/debug', [AnalyticsController::class, 'getTicketingAnalyticsDataDebug']);
+    Route::get('/analytics', [AnalyticsController::class, 'getAnalyticsData']);
     Route::get('/plc-status', [DashboardController::class, 'getPlcStatus']);
     
     // Forward Problem Routes
