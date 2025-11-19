@@ -106,8 +106,11 @@ class DashboardController extends Controller
                     // Count total machines for this line
                     $totalMachines = InspectionTable::where('line_name', $lineName)->count();
                     
-                    // Count active problems for this line
-                    // From log table
+                    // Get all tables for this line
+                    $tables = InspectionTable::where('line_name', $lineName)->get();
+                    $addresses = $tables->pluck('address')->toArray();
+                    
+                    // Get active problems from log table
                     $activeProblemsFromLog = DB::table('log')
                         ->join('inspection_tables', function($join) {
                             $join->on('log.tipe_mesin', '=', 'inspection_tables.address')
@@ -115,14 +118,19 @@ class DashboardController extends Controller
                         })
                         ->where('log.status', 'ON')
                         ->where('inspection_tables.line_name', $lineName)
-                        ->count();
+                        ->get()
+                        ->keyBy(function($item) {
+                            return $item->machine_name . '_line_' . $item->table_line_name;
+                        });
                     
-                    // Count cycle-based problems for this line
-                    $tables = InspectionTable::where('line_name', $lineName)->get();
-                    $addresses = $tables->pluck('address')->toArray();
-                    
+                    // Initialize counters
+                    $runningCount = 0;
+                    $idleCount = 0;
+                    $stopCount = 0;
                     $cycleBasedProblemsCount = 0;
+                    
                     if (!empty($addresses)) {
+                        // Get latest production data
                         $latestProductions = DB::table('production_data')
                             ->select([
                                 'production_data.*',
@@ -143,30 +151,63 @@ class DashboardController extends Controller
                                 return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
                             });
                         
+                        // Check each machine status
                         foreach ($tables as $table) {
                             $machineName = $table->name;
                             $lineNameTable = $table->line_name;
+                            $problemKey = $machineName . '_line_' . $lineNameTable;
                             $productionKey = $machineName . '_line_' . $lineNameTable;
-                            $latestProduction = $latestProductions->get($productionKey);
                             
+                            // Check for active problem from log
+                            $activeProblem = $activeProblemsFromLog->get($problemKey);
+                            
+                            // Get latest production data
+                            $latestProduction = $latestProductions->get($productionKey);
                             if (!$latestProduction) {
                                 $latestProduction = $latestProductions->firstWhere('machine_name', $machineName);
                             }
                             
+                            // Check cycle-based status
                             $cacheKey = $table->id . '_' . ($latestProduction ? $latestProduction->quantity : 'no_data');
                             $cycleBasedStatus = $this->checkCycleBasedStatusWithCache($table, $latestProduction, $cacheKey);
-                            if ($cycleBasedStatus['status'] === 'problem') {
+                            
+                            // Determine machine status
+                            // Priority: activeProblem > cycleBasedProblem > cycleBasedWarning > normal
+                            if ($activeProblem) {
+                                // Machine has active problem - Stop
+                                $stopCount++;
+                                if ($cycleBasedStatus['status'] === 'problem') {
+                                    $cycleBasedProblemsCount++;
+                                }
+                            } elseif ($cycleBasedStatus['status'] === 'problem') {
+                                // Cycle-based problem - Stop
+                                $stopCount++;
                                 $cycleBasedProblemsCount++;
+                            } elseif ($cycleBasedStatus['status'] === 'warning') {
+                                // Cycle-based warning - Idle (quantity not increasing)
+                                $idleCount++;
+                            } elseif ($latestProduction) {
+                                // Machine has production data and no problems - Running
+                                $runningCount++;
+                            } else {
+                                // No production data - consider as Stop (offline)
+                                $stopCount++;
                             }
                         }
+                    } else {
+                        // No machines in this line
+                        $stopCount = $totalMachines;
                     }
                     
-                    $totalActiveProblems = $activeProblemsFromLog + $cycleBasedProblemsCount;
+                    $totalActiveProblems = $activeProblemsFromLog->count() + $cycleBasedProblemsCount;
                     
                     $divisionData['lines'][] = [
                         'name' => $lineName,
                         'total_machines' => $totalMachines,
-                        'active_problems' => $totalActiveProblems
+                        'active_problems' => $totalActiveProblems,
+                        'running_count' => $runningCount,
+                        'idle_count' => $idleCount,
+                        'stop_count' => $stopCount
                     ];
                 }
                 
@@ -1310,6 +1351,9 @@ class DashboardController extends Controller
                 ], 400);
         }
 
+        // Pastikan targetRole dalam lowercase untuk konsistensi
+        $targetRole = strtolower(trim($targetRole));
+
         // Update problem di database
         $problem->update([
             'is_forwarded' => true,
@@ -1317,6 +1361,15 @@ class DashboardController extends Controller
             'forwarded_by_user_id' => $session->id,
             'forwarded_at' => Carbon::now(config('app.timezone')),
             'forward_message' => $request->input('message', 'Problem telah diteruskan untuk penanganan.')
+        ]);
+        
+        // Log untuk debugging
+        \Log::info('Problem forwarded', [
+            'problem_id' => $problem->id,
+            'problem_type' => $problem->tipe_problem,
+            'forwarded_to_role' => $targetRole,
+            'forwarded_by' => $session->id,
+            'forwarded_by_role' => $session->role
         ]);
         
         $forwardData = [
@@ -1403,9 +1456,28 @@ class DashboardController extends Controller
 
         // Validasi bahwa problem bisa diterima oleh user ini
         if (!$problem->canBeReceivedBy((object)$session)) {
+            // Log detail untuk debugging
+            \Log::warning('Receive problem failed validation', [
+                'problem_id' => $problem->id,
+                'user_id' => $session->id,
+                'user_role' => $session->role,
+                'user_line' => $session->line_name,
+                'problem_status' => $problem->status,
+                'is_forwarded' => $problem->is_forwarded,
+                'is_received' => $problem->is_received,
+                'forwarded_to_role' => $problem->forwarded_to_role,
+                'problem_type' => $problem->tipe_problem
+            ]);
+            
             return response()->json([
                 'success' => false,
-                'message' => 'Problem tidak bisa diterima oleh user ini.'
+                'message' => 'Problem tidak bisa diterima oleh user ini. Pastikan problem sudah di-forward ke role Anda (' . $session->role . ').',
+                'debug' => [
+                    'user_role' => $session->role,
+                    'forwarded_to_role' => $problem->forwarded_to_role,
+                    'is_forwarded' => $problem->is_forwarded,
+                    'is_received' => $problem->is_received
+                ]
             ], 403);
         }
 
@@ -1519,12 +1591,28 @@ class DashboardController extends Controller
 
         // Jika ada ticketing terkait problem ini dan belum memiliki waktu repair_completed_at, set otomatis
         try {
-            \App\Models\TicketingProblem::where('problem_id', $problem->id)
+            $ticketing = \App\Models\TicketingProblem::where('problem_id', $problem->id)
                 ->whereNull('repair_completed_at')
-                ->update([
-                    'repair_completed_at' => Carbon::now(config('app.timezone'))
+                ->first();
+            
+            if ($ticketing) {
+                $ticketing->repair_completed_at = Carbon::now(config('app.timezone'));
+                $ticketing->save();
+                
+                // Update calculated times setelah repair_completed_at di-set
+                $ticketing->updateCalculatedTimes();
+                
+                \Log::info('Repair completed at set for ticketing', [
+                    'ticketing_id' => $ticketing->id,
+                    'problem_id' => $problem->id,
+                    'repair_completed_at' => $ticketing->repair_completed_at
                 ]);
+            }
         } catch (\Throwable $th) {
+            \Log::error('Error setting repair_completed_at for ticketing', [
+                'problem_id' => $problem->id,
+                'error' => $th->getMessage()
+            ]);
             // ignore soft-failure agar feedback tetap sukses
         }
 

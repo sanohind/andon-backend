@@ -328,21 +328,54 @@ class Log extends Model
      */
     public function canBeReceivedBy($user)
     {
+        // Validasi status problem
         if ($this->status !== 'ON') {
+            \Log::debug('canBeReceivedBy: Problem status is not ON', [
+                'problem_id' => $this->id,
+                'status' => $this->status
+            ]);
             return false;
         }
         
+        // Validasi apakah problem sudah di-forward
         if (!$this->is_forwarded) {
+            \Log::debug('canBeReceivedBy: Problem is not forwarded', [
+                'problem_id' => $this->id,
+                'is_forwarded' => $this->is_forwarded
+            ]);
             return false;
         }
         
+        // Validasi apakah problem sudah diterima
         if ($this->is_received) {
+            \Log::debug('canBeReceivedBy: Problem already received', [
+                'problem_id' => $this->id,
+                'is_received' => $this->is_received
+            ]);
             return false;
         }
         
-        if ($user->role !== $this->forwarded_to_role) {
+        // Validasi role user dengan forwarded_to_role (case-insensitive)
+        $userRole = strtolower(trim($user->role ?? ''));
+        $forwardedToRole = strtolower(trim($this->forwarded_to_role ?? ''));
+        
+        if ($userRole !== $forwardedToRole) {
+            \Log::warning('canBeReceivedBy: Role mismatch', [
+                'problem_id' => $this->id,
+                'user_role' => $user->role ?? 'null',
+                'user_role_normalized' => $userRole,
+                'forwarded_to_role' => $this->forwarded_to_role ?? 'null',
+                'forwarded_to_role_normalized' => $forwardedToRole,
+                'user_id' => $user->id ?? 'null'
+            ]);
             return false;
         }
+        
+        \Log::debug('canBeReceivedBy: All validations passed', [
+            'problem_id' => $this->id,
+            'user_role' => $userRole,
+            'forwarded_to_role' => $forwardedToRole
+        ]);
         
         return true;
     }

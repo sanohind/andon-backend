@@ -130,7 +130,7 @@ class TicketingProblemController extends Controller
             'pic_technician' => 'required|string|max:100',
             'diagnosis' => 'required|string',
             'result_repair' => 'required|string',
-            // problem_received_at ditetapkan otomatis saat Receive
+            'problem_received_at' => 'nullable|date', // Diterima dari form (read-only field)
             'diagnosis_started_at' => 'nullable|date',
             'repair_started_at' => 'nullable|date',
             // repair_completed_at ditetapkan otomatis saat Feedback
@@ -155,12 +155,26 @@ class TicketingProblemController extends Controller
         }
 
         // Buat ticketing baru
+        // Ambil problem_received_at dari request (sudah diisi di form)
+        // Jika tidak ada di request, ambil dari problem->received_at sebagai fallback
+        $problemReceivedAt = null;
+        if ($request->has('problem_received_at') && $request->problem_received_at) {
+            $problemReceivedAt = Carbon::parse($request->problem_received_at, config('app.timezone'));
+        } elseif ($problem->is_received && $problem->received_at) {
+            $problemReceivedAt = Carbon::parse($problem->received_at, config('app.timezone'));
+        }
+        
+        // Jika masih null, gunakan waktu sekarang sebagai fallback terakhir
+        if (!$problemReceivedAt) {
+            $problemReceivedAt = Carbon::now(config('app.timezone'));
+        }
+        
         $ticketing = TicketingProblem::create([
             'problem_id' => $request->problem_id,
             'pic_technician' => $request->pic_technician,
             'diagnosis' => $request->diagnosis,
             'result_repair' => $request->result_repair,
-            // problem_received_at akan diisi otomatis saat event Receive
+            'problem_received_at' => $problemReceivedAt, // Pastikan selalu ada nilai
             'diagnosis_started_at' => $request->diagnosis_started_at ? Carbon::parse($request->diagnosis_started_at, config('app.timezone')) : null,
             'repair_started_at' => $request->repair_started_at ? Carbon::parse($request->repair_started_at, config('app.timezone')) : null,
             // repair_completed_at akan diisi otomatis saat event Feedback
@@ -313,6 +327,9 @@ class TicketingProblemController extends Controller
             ], 404);
         }
 
+        // Refresh ticketing untuk memastikan data terbaru
+        $ticketing->refresh();
+        
         return response()->json([
             'success' => true,
             'data' => [
@@ -340,6 +357,12 @@ class TicketingProblemController extends Controller
                     'mttr' => $ticketing->formatted_mttr,
                     'mttd' => $ticketing->formatted_mttd,
                     'mtbf' => $ticketing->formatted_mtbf,
+                ],
+                'durations_seconds' => [
+                    'downtime_seconds' => $ticketing->downtime_seconds,
+                    'mttr_seconds' => $ticketing->mttr_seconds,
+                    'mttd_seconds' => $ticketing->mttd_seconds,
+                    'mtbf_seconds' => $ticketing->mtbf_seconds,
                 ],
                 'users' => [
                     'created_by' => $ticketing->createdByUser ? $ticketing->createdByUser->name : 'Unknown',

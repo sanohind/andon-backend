@@ -217,17 +217,17 @@ class TicketingProblem extends Model
 
     /**
      * Calculate MTTD (Mean Time To Diagnose)
-     * Waktu dari problem received hingga diagnosis started
+     * Waktu dari Diagnosis Started hingga Repair Started
      */
     public function calculateMTTD()
     {
-        if ($this->problem_received_at && $this->diagnosis_started_at) {
-            $received = Carbon::parse($this->problem_received_at);
+        if ($this->diagnosis_started_at && $this->repair_started_at) {
             $diagnosisStarted = Carbon::parse($this->diagnosis_started_at);
+            $repairStarted = Carbon::parse($this->repair_started_at);
             
-            // Pastikan diagnosis started setelah problem received
-            if ($diagnosisStarted->gt($received)) {
-                return $received->diffInSeconds($diagnosisStarted);
+            // Pastikan repair started setelah diagnosis started
+            if ($repairStarted->gt($diagnosisStarted)) {
+                return abs($diagnosisStarted->diffInSeconds($repairStarted));
             }
         }
         return null;
@@ -235,7 +235,7 @@ class TicketingProblem extends Model
 
     /**
      * Calculate MTTR (Mean Time To Repair)
-     * Waktu dari repair started hingga repair completed
+     * Waktu dari Repair Started hingga Repair Completed
      */
     public function calculateMTTR()
     {
@@ -245,7 +245,7 @@ class TicketingProblem extends Model
             
             // Pastikan repair completed setelah repair started
             if ($repairCompleted->gt($repairStarted)) {
-                return $repairStarted->diffInSeconds($repairCompleted);
+                return abs($repairStarted->diffInSeconds($repairCompleted));
             }
         }
         return null;
@@ -253,18 +253,23 @@ class TicketingProblem extends Model
 
     /**
      * Calculate Downtime
-     * PERUBAHAN: Downtime dihitung dari repair started hingga repair completed
-     * (bukan dari problem received hingga repair completed)
+     * Downtime dihitung dari Problem Received hingga Repair Completed
      */
     public function calculateDowntime()
     {
-        if ($this->repair_started_at && $this->repair_completed_at) {
-            $repairStarted = Carbon::parse($this->repair_started_at);
+        // Ambil problem_received_at dari ticketing atau dari problem jika belum ada
+        $problemReceivedAt = $this->problem_received_at;
+        if (!$problemReceivedAt && $this->problem && $this->problem->received_at) {
+            $problemReceivedAt = $this->problem->received_at;
+        }
+        
+        if ($problemReceivedAt && $this->repair_completed_at) {
+            $received = Carbon::parse($problemReceivedAt);
             $repairCompleted = Carbon::parse($this->repair_completed_at);
             
-            // Pastikan repair completed setelah repair started
-            if ($repairCompleted->gt($repairStarted)) {
-                return $repairStarted->diffInSeconds($repairCompleted);
+            // Pastikan repair completed setelah problem received
+            if ($repairCompleted->gt($received)) {
+                return abs($received->diffInSeconds($repairCompleted));
             }
         }
         return null;
@@ -272,17 +277,50 @@ class TicketingProblem extends Model
 
     /**
      * Update calculated times
+     * Update semua perhitungan waktu berdasarkan timestamp yang ada
      */
     public function updateCalculatedTimes()
     {
-        $this->mttd_seconds = $this->calculateMTTD();
-        $this->mttr_seconds = $this->calculateMTTR();
-        $this->downtime_seconds = $this->calculateDowntime();
+        // Refresh model untuk memastikan data terbaru dari database
+        $this->refresh();
+        
+        // Hitung ulang semua durasi
+        $mttdSeconds = $this->calculateMTTD();
+        $mttrSeconds = $this->calculateMTTR();
+        $downtimeSeconds = $this->calculateDowntime();
+        
+        // Log untuk debugging
+        \Log::debug('Updating calculated times', [
+            'ticketing_id' => $this->id,
+            'problem_received_at' => $this->problem_received_at,
+            'diagnosis_started_at' => $this->diagnosis_started_at,
+            'repair_started_at' => $this->repair_started_at,
+            'repair_completed_at' => $this->repair_completed_at,
+            'calculated_mttd' => $mttdSeconds,
+            'calculated_mttr' => $mttrSeconds,
+            'calculated_downtime' => $downtimeSeconds
+        ]);
+        
+        // Update nilai
+        $this->mttd_seconds = $mttdSeconds;
+        $this->mttr_seconds = $mttrSeconds;
+        $this->downtime_seconds = $downtimeSeconds;
         
         // MTBF calculation would need historical data, so we'll leave it for now
         $this->mtbf_seconds = null;
         
-        $this->save();
+        // Save tanpa trigger event untuk menghindari infinite loop
+        // Gunakan withoutEvents untuk Laravel 5.7+ atau saveQuietly untuk Laravel 8+
+        if (method_exists($this, 'saveQuietly')) {
+            $this->saveQuietly();
+        } else {
+            static::withoutEvents(function () {
+                $this->save();
+            });
+        }
+        
+        // Refresh lagi setelah save
+        $this->refresh();
     }
 
     /**
