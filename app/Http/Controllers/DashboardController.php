@@ -112,6 +112,11 @@ class DashboardController extends Controller
                     
                     // Get active problems from log table
                     $activeProblemsFromLog = DB::table('log')
+                        ->select([
+                            'log.*',
+                            'inspection_tables.name as machine_name',
+                            'inspection_tables.line_name as table_line_name'
+                        ])
                         ->join('inspection_tables', function($join) {
                             $join->on('log.tipe_mesin', '=', 'inspection_tables.address')
                                  ->on('log.line_name', '=', 'inspection_tables.line_name');
@@ -120,7 +125,7 @@ class DashboardController extends Controller
                         ->where('inspection_tables.line_name', $lineName)
                         ->get()
                         ->keyBy(function($item) {
-                            return $item->machine_name . '_line_' . $item->table_line_name;
+                            return ($item->machine_name ?? '') . '_line_' . ($item->table_line_name ?? '');
                         });
                     
                     // Initialize counters
@@ -131,25 +136,30 @@ class DashboardController extends Controller
                     
                     if (!empty($addresses)) {
                         // Get latest production data
-                        $latestProductions = DB::table('production_data')
-                            ->select([
-                                'production_data.*',
-                                'inspection_tables.name as machine_name',
-                                'inspection_tables.line_name as table_line_name'
-                            ])
-                            ->join('inspection_tables', function($join) {
-                                $join->on('production_data.machine_name', '=', 'inspection_tables.address')
-                                     ->on('production_data.line_name', '=', 'inspection_tables.line_name');
-                            })
-                            ->whereIn('production_data.machine_name', $addresses)
-                            ->orderBy('production_data.timestamp', 'desc')
-                            ->get()
-                            ->unique(function($item) {
-                                return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
-                            })
-                            ->keyBy(function($item) {
-                                return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
-                            });
+                        try {
+                            $latestProductions = DB::table('production_data')
+                                ->select([
+                                    'production_data.*',
+                                    'inspection_tables.name as machine_name',
+                                    'inspection_tables.line_name as table_line_name'
+                                ])
+                                ->join('inspection_tables', function($join) {
+                                    $join->on('production_data.machine_name', '=', 'inspection_tables.address')
+                                         ->on('production_data.line_name', '=', 'inspection_tables.line_name');
+                                })
+                                ->whereIn('production_data.machine_name', $addresses)
+                                ->orderBy('production_data.timestamp', 'desc')
+                                ->get()
+                                ->unique(function($item) {
+                                    return ($item->machine_name ?? '') . '_line_' . ($item->table_line_name ?? 'default');
+                                })
+                                ->keyBy(function($item) {
+                                    return ($item->machine_name ?? '') . '_line_' . ($item->table_line_name ?? 'default');
+                                });
+                        } catch (\Exception $e) {
+                            \Log::warning('Error fetching production data for line ' . $lineName . ': ' . $e->getMessage());
+                            $latestProductions = collect(); // Empty collection if query fails
+                        }
                         
                         // Check each machine status
                         foreach ($tables as $table) {
@@ -164,26 +174,43 @@ class DashboardController extends Controller
                             // Get latest production data
                             $latestProduction = $latestProductions->get($productionKey);
                             if (!$latestProduction) {
-                                $latestProduction = $latestProductions->firstWhere('machine_name', $machineName);
+                                // Try to find by machine name (fallback)
+                                $latestProduction = $latestProductions->first(function($item) use ($machineName) {
+                                    return isset($item->machine_name) && $item->machine_name === $machineName;
+                                });
                             }
                             
-                            // Check cycle-based status
-                            $cacheKey = $table->id . '_' . ($latestProduction ? $latestProduction->quantity : 'no_data');
-                            $cycleBasedStatus = $this->checkCycleBasedStatusWithCache($table, $latestProduction, $cacheKey);
+                            // Additional fallback: try to find by address directly if still not found
+                            if (!$latestProduction) {
+                                $latestProduction = DB::table('production_data')
+                                    ->where('machine_name', $table->address)
+                                    ->orderBy('timestamp', 'desc')
+                                    ->first();
+                            }
+                            
+                            // Check cycle-based status (with error handling)
+                            try {
+                                $cacheKey = $table->id . '_' . ($latestProduction ? ($latestProduction->quantity ?? 'no_data') : 'no_data');
+                                $cycleBasedStatus = $this->checkCycleBasedStatusWithCache($table, $latestProduction, $cacheKey);
+                            } catch (\Exception $e) {
+                                // If cycle status check fails, default to normal
+                                \Log::warning('Error checking cycle status for ' . $machineName . ': ' . $e->getMessage());
+                                $cycleBasedStatus = ['status' => 'normal', 'cycles_without_increase' => 0];
+                            }
                             
                             // Determine machine status
                             // Priority: activeProblem > cycleBasedProblem > cycleBasedWarning > normal
                             if ($activeProblem) {
                                 // Machine has active problem - Stop
                                 $stopCount++;
-                                if ($cycleBasedStatus['status'] === 'problem') {
+                                if (isset($cycleBasedStatus['status']) && $cycleBasedStatus['status'] === 'problem') {
                                     $cycleBasedProblemsCount++;
                                 }
-                            } elseif ($cycleBasedStatus['status'] === 'problem') {
+                            } elseif (isset($cycleBasedStatus['status']) && $cycleBasedStatus['status'] === 'problem') {
                                 // Cycle-based problem - Stop
                                 $stopCount++;
                                 $cycleBasedProblemsCount++;
-                            } elseif ($cycleBasedStatus['status'] === 'warning') {
+                            } elseif (isset($cycleBasedStatus['status']) && $cycleBasedStatus['status'] === 'warning') {
                                 // Cycle-based warning - Idle (quantity not increasing)
                                 $idleCount++;
                             } elseif ($latestProduction) {
@@ -221,9 +248,11 @@ class DashboardController extends Controller
             
         } catch (\Exception $e) {
             \Log::error('Error getting divisions and lines: ' . $e->getMessage());
+            \Log::error('Stack trace: ' . $e->getTraceAsString());
             return response()->json([
                 'success' => false,
-                'message' => 'Error getting divisions and lines: ' . $e->getMessage()
+                'message' => 'Error getting divisions and lines: ' . $e->getMessage(),
+                'error_details' => config('app.debug') ? $e->getTraceAsString() : null
             ], 500);
         }
     }
