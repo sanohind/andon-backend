@@ -6,6 +6,8 @@ use App\Models\Log;
 use App\Models\ProductionData;
 use App\Models\InspectionTable;
 use App\Models\ForwardProblemLog;
+use App\Models\Division;
+use App\Models\Line;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -44,33 +46,29 @@ class DashboardController extends Controller
 
     /**
      * Get division and line mapping for manager filtering
+     * Now uses database instead of hardcoded values
      */
     private function getDivisionLineMapping()
     {
-        return [
-            'Brazing' => [
-                'Leak Test Inspection',
-                'Support',
-                'Hand Bending',
-                'Welding'
-            ],
-            'Chassis' => [
-                'Cutting',
-                'Flaring',
-                'MF/TK',
-                'LRFD',
-                'Assy'
-            ],
-            'Nylon' => [
-                'Injection/Extrude',
-                'Roda Dua',
-                'Roda Empat'
-            ]
-        ];
+        try {
+            $divisions = Division::with('lines')->orderBy('name')->get();
+            $mapping = [];
+            
+            foreach ($divisions as $division) {
+                $mapping[$division->name] = $division->lines->pluck('name')->toArray();
+            }
+            
+            return $mapping;
+        } catch (\Exception $e) {
+            \Log::error('Error getting division line mapping: ' . $e->getMessage());
+            // Fallback to empty array if database query fails
+            return [];
+        }
     }
 
     /**
      * Get divisions and lines with machine counts and active problems
+     * Now uses database instead of hardcoded values
      */
     public function getDivisionsAndLines(Request $request)
     {
@@ -78,31 +76,31 @@ class DashboardController extends Controller
             $userRole = $request->input('user_role') ?? $request->header('X-User-Role');
             $userDivision = $request->input('user_division') ?? $request->header('X-User-Division');
             
-            $mapping = $this->getDivisionLineMapping();
+            // Get divisions from database
+            $query = Division::with('lines');
             
             // Determine which divisions to show
-            $divisionsToShow = [];
             if (in_array($userRole, ['admin', 'management', 'maintenance', 'quality', 'engineering'])) {
                 // Show all divisions
-                $divisionsToShow = array_keys($mapping);
+                // No filter needed
             } elseif ($userRole === 'manager' && $userDivision) {
                 // Show only manager's division
-                $divisionsToShow = [$userDivision];
-            } else {
-                // Default: show all if role not recognized
-                $divisionsToShow = array_keys($mapping);
+                $query->where('name', $userDivision);
             }
+            // Default: show all if role not recognized
+            
+            $divisions = $query->orderBy('name')->get();
             
             $result = [];
             
-            foreach ($divisionsToShow as $division) {
-                $lines = $mapping[$division] ?? [];
+            foreach ($divisions as $division) {
                 $divisionData = [
-                    'name' => $division,
+                    'name' => $division->name,
                     'lines' => []
                 ];
                 
-                foreach ($lines as $lineName) {
+                foreach ($division->lines as $line) {
+                    $lineName = $line->name;
                     // Count total machines for this line
                     $totalMachines = InspectionTable::where('line_name', $lineName)->count();
                     
@@ -260,16 +258,24 @@ class DashboardController extends Controller
 
     /**
      * Check if manager can see specific line based on their division
+     * Now uses database instead of hardcoded values
      */
     private function canManagerSeeLine($managerDivision, $lineName)
     {
-        $mapping = $this->getDivisionLineMapping();
-        
-        if (!isset($mapping[$managerDivision])) {
+        try {
+            $division = Division::where('name', $managerDivision)
+                ->with('lines')
+                ->first();
+            
+            if (!$division) {
+                return false;
+            }
+            
+            return $division->lines->contains('name', $lineName);
+        } catch (\Exception $e) {
+            \Log::error('Error checking manager line access: ' . $e->getMessage());
             return false;
         }
-        
-        return in_array($lineName, $mapping[$managerDivision]);
     }
 
     /**

@@ -8,6 +8,7 @@ use App\Http\Controllers\UserController;
 use App\Http\Controllers\InspectionTableController;
 use App\Http\Controllers\TicketingProblemController;
 use App\Http\Controllers\PartConfigurationController;
+use App\Http\Controllers\DivisionLineController;
 
 // Auth Routes - TANPA PREFIX AUTH
 Route::post('/login', [AuthController::class, 'login']);
@@ -21,11 +22,9 @@ Route::prefix('dashboard')->group(function () {
     Route::get('/problem/{id}', [DashboardController::class, 'getProblemDetail']);
     Route::patch('/problem/{id}/status', [DashboardController::class, 'updateProblemStatus']);
     Route::get('/stats', [DashboardController::class, 'getDashboardStats']);
-    // Analytics routes - specific routes first to avoid route conflicts
     Route::get('/analytics/duration', [AnalyticsController::class, 'getProblemDurationAnalytics']);
     Route::get('/analytics/detailed-forward', [AnalyticsController::class, 'getDetailedForwardAnalyticsData']);
     Route::get('/analytics/ticketing', [AnalyticsController::class, 'getTicketingAnalyticsData']);
-    Route::get('/analytics/ticketing/debug', [AnalyticsController::class, 'getTicketingAnalyticsDataDebug']);
     Route::get('/analytics', [AnalyticsController::class, 'getAnalyticsData']);
     Route::get('/plc-status', [DashboardController::class, 'getPlcStatus']);
     
@@ -53,6 +52,17 @@ Route::get('problems/active', [DashboardController::class, 'getActiveProblemsApi
 
 // Divisions and lines route - accessible without Sanctum (uses custom auth)
 Route::get('divisions-lines', [DashboardController::class, 'getDivisionsAndLines']);
+
+// Division and Line management routes - accessible without Sanctum (uses custom auth)
+Route::prefix('division-lines')->group(function () {
+    Route::get('/', [DivisionLineController::class, 'index']);
+    Route::post('/divisions', [DivisionLineController::class, 'storeDivision']);
+    Route::put('/divisions/{id}', [DivisionLineController::class, 'updateDivision']);
+    Route::delete('/divisions/{id}', [DivisionLineController::class, 'destroyDivision']);
+    Route::post('/lines', [DivisionLineController::class, 'storeLine']);
+    Route::put('/lines/{id}', [DivisionLineController::class, 'updateLine']);
+    Route::delete('/lines/{id}', [DivisionLineController::class, 'destroyLine']);
+});
 
 // Add new problem route - accessible without Sanctum (uses custom auth)
 Route::post('problems/add', [DashboardController::class, 'addProblem']);
