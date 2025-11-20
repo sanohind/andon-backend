@@ -337,7 +337,7 @@ class AnalyticsController extends Controller
                       ->orWhereBetween('feedback_resolved_at', [$startDate, $endDate]);
             })
             ->with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])
-            ->orderBy('resolved_at', 'desc')
+            ->orderBy('resolved_at', 'asc')
             ->get();
             
         // Jika tidak ada data dalam rentang waktu, ambil semua resolved data untuk testing
@@ -345,7 +345,7 @@ class AnalyticsController extends Controller
             $resolvedProblems = Log::where('status', 'OFF')
                 ->whereNotNull('resolved_at')
                 ->with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])
-                ->orderBy('resolved_at', 'desc')
+                ->orderBy('resolved_at', 'asc')
                 ->get();
         }
 
@@ -480,7 +480,7 @@ class AnalyticsController extends Controller
 
         $ticketingData = TicketingProblem::with(['problem', 'createdByUser', 'updatedByUser'])
             ->whereBetween('created_at', [$startDate, $endDate])
-            ->orderBy('created_at', 'desc')
+            ->orderBy('created_at', 'asc')
             ->get()
             ->map(function($ticketing) use ($appTimezone) {
                 try {

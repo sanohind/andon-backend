@@ -26,7 +26,7 @@ class TicketingProblemController extends Controller
 
         $ticketingData = TicketingProblem::with(['problem', 'createdByUser', 'updatedByUser'])
             ->whereBetween('created_at', [$startDate, $endDate])
-            ->orderBy('created_at', 'desc')
+            ->orderBy('created_at', 'asc')
             ->get()
             ->map(function($ticketing) {
                 return [

@@ -35,6 +35,11 @@ class PartConfigurationController extends Controller
      */
     public function store(Request $request)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         $validated = $request->validate([
             'address' => 'required|string|exists:inspection_tables,address',
             'channel' => 'required|integer|min:0',
@@ -78,6 +83,11 @@ class PartConfigurationController extends Controller
      */
     public function update(Request $request, string $id)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         $configuration = PartConfiguration::find($id);
         
         if (!$configuration) {
@@ -107,8 +117,13 @@ class PartConfigurationController extends Controller
     /**
      * Remove the specified resource from storage.
      */
-    public function destroy(string $id)
+    public function destroy(Request $request, string $id)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         $configuration = PartConfiguration::find($id);
         
         if (!$configuration) {
@@ -131,6 +146,11 @@ class PartConfigurationController extends Controller
      */
     public function bulkImport(Request $request)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         $request->validate([
             'configurations' => 'required|array',
             'configurations.*.address' => 'required|string|exists:inspection_tables,address',

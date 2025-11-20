@@ -26,11 +26,16 @@ class UserController extends Controller
 
     public function store(Request $request)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'username' => 'required|string|max:255|unique:users',
             'password' => 'required|string|min:8',
-            'role' => ['required', Rule::in(['admin', 'manager', 'leader', 'maintenance', 'quality', 'engineering'])],
+            'role' => ['required', Rule::in(['admin', 'management', 'manager', 'leader', 'maintenance', 'quality', 'engineering'])],
             'division' => 'nullable|string|max:50|required_if:role,manager|required_if:role,leader',
             'line_name' => 'nullable|string|max:50|required_if:role,leader',
         ]);
@@ -58,11 +63,16 @@ class UserController extends Controller
 
     public function update(Request $request, User $user)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'username' => ['required','string','max:255', Rule::unique('users')->ignore($user->id)],
             'password' => 'nullable|string|min:8',
-            'role' => ['required', Rule::in(['admin', 'manager', 'leader', 'maintenance', 'quality', 'engineering'])],
+            'role' => ['required', Rule::in(['admin', 'management', 'manager', 'leader', 'maintenance', 'quality', 'engineering'])],
             'division' => 'nullable|string|max:50|required_if:role,manager|required_if:role,leader',
             'line_name' => 'nullable|string|max:50|required_if:role,leader',
         ]);
@@ -90,8 +100,13 @@ class UserController extends Controller
         return response()->json($user);
     }
 
-    public function destroy(User $user)
+    public function destroy(Request $request, User $user)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         $user->delete();
         return response()->json(['success' => true]);
     }

@@ -252,8 +252,9 @@ class Log extends Model
     {
         switch ($userRole) {
             case 'admin':
+            case 'management':
             case 'manager':
-                // Admin dan Manager bisa melihat semua problem
+                // Admin, Management, dan Manager bisa melihat semua problem
                 return $query;
                 
             case 'leader':

@@ -82,7 +82,7 @@ class DashboardController extends Controller
             
             // Determine which divisions to show
             $divisionsToShow = [];
-            if (in_array($userRole, ['admin', 'maintenance', 'quality', 'engineering'])) {
+            if (in_array($userRole, ['admin', 'management', 'maintenance', 'quality', 'engineering'])) {
                 // Show all divisions
                 $divisionsToShow = array_keys($mapping);
             } elseif ($userRole === 'manager' && $userDivision) {
@@ -950,6 +950,11 @@ class DashboardController extends Controller
      */
     public function updateProblemStatus(Request $request, $id)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         // Cari masalah yang statusnya masih 'ON' berdasarkan ID
         $problem = Log::where('id', $id)->where('status', 'ON')->first();
 
@@ -1164,6 +1169,11 @@ class DashboardController extends Controller
 
     public function createPlcDevice(Request $request)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         try {
             $request->validate([
                 'device_id' => 'required|string|max:50|unique:device_status,device_id',
@@ -1206,6 +1216,11 @@ class DashboardController extends Controller
 
     public function updatePlcDevice(Request $request, $id)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         try {
             $request->validate([
                 'device_id' => 'required|string|max:50|unique:device_status,device_id,' . $id,
@@ -1252,8 +1267,13 @@ class DashboardController extends Controller
         }
     }
 
-    public function deletePlcDevice($id)
+    public function deletePlcDevice(Request $request, $id)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         try {
             $deleted = DB::table('device_status')->where('id', $id)->delete();
 
@@ -1299,6 +1319,11 @@ class DashboardController extends Controller
 
     public function forwardProblem(Request $request, $id)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         // Ambil token dari request header
         $token = $request->bearerToken() ?? $request->header('Authorization');
         if (!$token) {
@@ -1440,6 +1465,11 @@ class DashboardController extends Controller
      */
     public function receiveProblem(Request $request, $id)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         // Ambil token dari request header
         $token = $request->bearerToken() ?? $request->header('Authorization');
         if (!$token) {
@@ -1559,6 +1589,11 @@ class DashboardController extends Controller
      */
     public function feedbackResolved(Request $request, $id)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         // Ambil token dari request header
         $token = $request->bearerToken() ?? $request->header('Authorization');
         if (!$token) {
@@ -1677,6 +1712,11 @@ class DashboardController extends Controller
      */
     public function finalResolved(Request $request, $id)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         // Ambil token dari request header
         $token = $request->bearerToken() ?? $request->header('Authorization');
         if (!$token) {

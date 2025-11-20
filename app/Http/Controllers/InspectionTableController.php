@@ -35,6 +35,11 @@ class InspectionTableController extends Controller
 
     public function store(Request $request)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'line_name' => 'required|string|max:50',
@@ -94,6 +99,11 @@ class InspectionTableController extends Controller
 
     public function update(Request $request, InspectionTable $inspectionTable)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'line_name' => 'required|string|max:50'
@@ -115,6 +125,11 @@ class InspectionTableController extends Controller
 
     public function updateByAddress(Request $request, $address)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'division' => 'required|string|max:50',
@@ -154,6 +169,11 @@ class InspectionTableController extends Controller
 
     public function setTarget(Request $request, $address)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         $validated = $request->validate([
             'target_quantity' => 'required|integer|min:0'
         ]);
@@ -188,6 +208,11 @@ class InspectionTableController extends Controller
 
     public function setCycle(Request $request, $address)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         $validated = $request->validate([
             'cycle_time' => 'required|integer|min:0'
         ]);
@@ -221,6 +246,11 @@ class InspectionTableController extends Controller
 
     public function setCycleThreshold(Request $request, $address)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         try {
             $validated = $request->validate([
                 'warning_cycle_count' => 'required|integer|min:1',
@@ -295,8 +325,13 @@ class InspectionTableController extends Controller
         return response()->json(['success' => true, 'data' => $result]);
     }
 
-    public function destroy($inspectionTable)
+    public function destroy(Request $request, $inspectionTable)
     {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
         try {
             // Handle both model binding and direct ID
             if ($inspectionTable instanceof InspectionTable) {
