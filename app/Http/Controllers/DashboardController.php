@@ -8,9 +8,11 @@ use App\Models\InspectionTable;
 use App\Models\ForwardProblemLog;
 use App\Models\Division;
 use App\Models\Line;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use Carbon\Carbon;
 
 class DashboardController extends Controller
@@ -286,20 +288,37 @@ class DashboardController extends Controller
         // Get user role and division from request or session
         $userRole = $request->input('user_role') ?? $request->header('X-User-Role');
         $userDivision = $request->input('user_division') ?? $request->header('X-User-Division');
+        // PERBAIKAN: Ambil line_name dari request untuk filtering
+        $lineName = $request->input('line_name') ?? $request->header('X-Line-Name');
         
         
-        // Ambil SEMUA meja, karena filter akan dilakukan di frontend Node.js/EJS
-        $allInspectionTables = InspectionTable::all();
+        // Ambil meja dengan filtering
+        $allInspectionTables = InspectionTable::query();
+        
+        // Filter berdasarkan line_name jika ada
+        if ($lineName) {
+            $allInspectionTables->where('line_name', $lineName);
+        }
         
         // Filter tables based on user role and division
         if ($userRole === 'manager' && $userDivision) {
             $mapping = $this->getDivisionLineMapping();
             $allowedLines = $mapping[$userDivision] ?? [];
             
-            $allInspectionTables = $allInspectionTables->filter(function($table) use ($allowedLines) {
-                return in_array($table->line_name, $allowedLines);
-            });
+            if (!empty($allowedLines)) {
+                if ($lineName) {
+                    // Jika line_name sudah di-filter, pastikan line tersebut ada di allowedLines
+                    if (!in_array($lineName, $allowedLines)) {
+                        $allInspectionTables->whereRaw('1 = 0'); // Return empty result
+                    }
+                } else {
+                    // Filter berdasarkan allowedLines
+                    $allInspectionTables->whereIn('line_name', $allowedLines);
+                }
+            }
         }
+        
+        $allInspectionTables = $allInspectionTables->get();
         
         // Sort using natural order (handles numbers correctly)
         $allInspectionTables = $allInspectionTables->sort(function($a, $b) {
@@ -708,15 +727,21 @@ class DashboardController extends Controller
             }
         }
         
+        // PERBAIKAN: Ambil line_name dari query parameter atau header untuk filtering
+        $lineName = $request->input('line_name') ?? $request->header('X-Line-Name');
+        
         // Log request for debugging
         \Log::info('Dashboard status API called', [
             'has_token' => !empty($token),
             'user_role' => $userRole,
             'user_line' => $userLineName,
             'user_division' => $userDivision,
+            'line_filter' => $lineName,
             'ip' => $request->ip()
         ]);
 
+        // PERBAIKAN: Kirim line_name ke getMachineStatuses untuk filtering
+        $request->merge(['line_name' => $lineName]);
         $machineStatusesGroupedByLine = $this->getMachineStatuses($request); 
         $activeProblems = $this->getActiveProblems($request, $userRole, $userLineName, $userDivision);
         $newProblems = $this->getNewProblems($request, $userRole, $userLineName, $userDivision);
@@ -1651,6 +1676,20 @@ class DashboardController extends Controller
             ], 403);
         }
 
+        // Validasi result_repair wajib diisi
+        $request->validate([
+            'result_repair' => 'required|string|min:1',
+            'message' => 'nullable|string'
+        ]);
+        
+        // Log untuk debugging
+        \Log::info('Feedback resolved request received', [
+            'problem_id' => $problem->id,
+            'result_repair_provided' => $request->has('result_repair'),
+            'result_repair_value' => $request->input('result_repair') ? 'has_value' : 'empty',
+            'result_repair_length' => $request->input('result_repair') ? strlen($request->input('result_repair')) : 0
+        ]);
+
         // Update problem di database
         $problem->update([
             'has_feedback_resolved' => true,
@@ -1659,31 +1698,120 @@ class DashboardController extends Controller
             'feedback_message' => $request->input('message', 'Problem sudah selesai ditangani.')
         ]);
 
-        // Jika ada ticketing terkait problem ini dan belum memiliki waktu repair_completed_at, set otomatis
+        // Jika ada ticketing terkait problem ini, update result_repair dan status menjadi close
         try {
             $ticketing = \App\Models\TicketingProblem::where('problem_id', $problem->id)
-                ->whereNull('repair_completed_at')
                 ->first();
             
             if ($ticketing) {
+                // Ambil result_repair dari request
+                $resultRepair = $request->input('result_repair');
+                
+                // Log untuk debugging
+                \Log::info('Updating ticketing with feedback resolved', [
+                    'ticketing_id' => $ticketing->id,
+                    'problem_id' => $problem->id,
+                    'result_repair_provided' => !empty($resultRepair),
+                    'result_repair_length' => $resultRepair ? strlen($resultRepair) : 0
+                ]);
+                
+                // Validasi result_repair tidak kosong
+                if (empty($resultRepair) || trim($resultRepair) === '') {
+                    \Log::error('result_repair is empty when trying to update ticketing', [
+                        'ticketing_id' => $ticketing->id,
+                        'problem_id' => $problem->id
+                    ]);
+                    throw new \Exception('Result repair tidak boleh kosong');
+                }
+                
+                // Update ticketing dengan result_repair dan repair_completed_at
+                $ticketing->result_repair = trim($resultRepair);
                 $ticketing->repair_completed_at = Carbon::now(config('app.timezone'));
-                $ticketing->save();
+                $ticketing->updated_by_user_id = $session->id;
+                
+                // Status: tetap OPEN sampai result_repair terisi dan repair_completed_at terisi
+                // Setelah itu baru jadi close (CLOSED)
+                // Pastikan kedua field terisi sebelum ubah status
+                if (!empty(trim($ticketing->result_repair)) && $ticketing->repair_completed_at) {
+                    $ticketing->status = 'close'; // CLOSED
+                } else {
+                    $ticketing->status = 'open'; // Tetap OPEN
+                }
+                
+                $statusDowngraded = false;
+                
+                // Save ticketing dengan penanganan apabila enum status belum memiliki nilai 'close'
+                try {
+                    $saved = $ticketing->save();
+                } catch (QueryException $e) {
+                    if ($this->isTicketingStatusEnumError($e)) {
+                        $this->ensureTicketingStatusEnumHasClose();
+                        try {
+                            $saved = $ticketing->save();
+                        } catch (QueryException $retryException) {
+                            \Log::warning('Retry save after ensuring status enum still failed, downgrading status to completed', [
+                                'ticketing_id' => $ticketing->id,
+                                'problem_id' => $problem->id,
+                                'error' => $retryException->getMessage()
+                            ]);
+                            $ticketing->status = 'completed'; // Fallback agar data lain tetap tersimpan
+                            $saved = $ticketing->save();
+                            $statusDowngraded = true;
+                        }
+                    } else {
+                        throw $e;
+                    }
+                }
+                
+                if (!$saved) {
+                    \Log::error('Failed to save ticketing', [
+                        'ticketing_id' => $ticketing->id,
+                        'problem_id' => $problem->id,
+                        'result_repair' => $ticketing->result_repair,
+                        'repair_completed_at' => $ticketing->repair_completed_at,
+                        'status' => $ticketing->status
+                    ]);
+                    throw new \Exception('Gagal menyimpan ticketing ke database');
+                }
+                
+                // Refresh untuk memastikan data terbaru
+                $ticketing->refresh();
+                
+                // Verifikasi data tersimpan dengan benar
+                if (empty($ticketing->result_repair) || !$ticketing->repair_completed_at) {
+                    \Log::error('Data ticketing tidak tersimpan dengan benar setelah save', [
+                        'ticketing_id' => $ticketing->id,
+                        'result_repair' => $ticketing->result_repair ? 'filled' : 'empty',
+                        'repair_completed_at' => $ticketing->repair_completed_at ? 'filled' : 'empty'
+                    ]);
+                    throw new \Exception('Data ticketing tidak tersimpan dengan benar');
+                }
                 
                 // Update calculated times setelah repair_completed_at di-set
                 $ticketing->updateCalculatedTimes();
                 
-                \Log::info('Repair completed at set for ticketing', [
+                \Log::info('Repair completed at set for ticketing and status updated to close', [
                     'ticketing_id' => $ticketing->id,
                     'problem_id' => $problem->id,
-                    'repair_completed_at' => $ticketing->repair_completed_at
+                    'result_repair' => $ticketing->result_repair ? 'filled' : 'empty',
+                    'repair_completed_at' => $ticketing->repair_completed_at,
+                    'status' => $ticketing->status,
+                    'saved' => $saved,
+                    'status_downgraded' => $statusDowngraded
+                ]);
+            } else {
+                \Log::warning('No ticketing found for problem when feedback resolved', [
+                    'problem_id' => $problem->id
                 ]);
             }
         } catch (\Throwable $th) {
-            \Log::error('Error setting repair_completed_at for ticketing', [
+            \Log::error('Error setting repair_completed_at and result_repair for ticketing', [
                 'problem_id' => $problem->id,
-                'error' => $th->getMessage()
+                'error' => $th->getMessage(),
+                'trace' => $th->getTraceAsString()
             ]);
-            // ignore soft-failure agar feedback tetap sukses
+            // Log error tapi jangan stop proses feedback resolved
+            // Feedback resolved tetap sukses meskipun update ticketing gagal
         }
 
         // Log feedback resolved event
@@ -2227,5 +2355,43 @@ class DashboardController extends Controller
             'problem_threshold' => $table->problem_cycle_count,
             'time_elapsed_seconds' => $timeElapsedSeconds // Add for debugging
         ];
+    }
+
+    /**
+     * Detect apakah error berasal dari enum status yang belum mengenal nilai 'close'
+     */
+    private function isTicketingStatusEnumError(QueryException $exception): bool
+    {
+        $message = Str::lower($exception->getMessage());
+        
+        return Str::contains($message, 'ticketing_problems_status_enum')
+            || Str::contains($message, 'invalid input value for enum')
+            || Str::contains($message, "data truncated for column 'status'")
+            || (Str::contains($message, 'check constraint') && Str::contains($message, 'status'));
+    }
+
+    /**
+     * Pastikan enum status di tabel ticketing_problems memiliki opsi 'close'
+     */
+    private function ensureTicketingStatusEnumHasClose(): void
+    {
+        try {
+            $driver = DB::getDriverName();
+            
+            if ($driver === 'pgsql') {
+                DB::statement("ALTER TYPE ticketing_problems_status_enum ADD VALUE IF NOT EXISTS 'close'");
+            } elseif (in_array($driver, ['mysql', 'mariadb'])) {
+                DB::statement("ALTER TABLE ticketing_problems MODIFY COLUMN status ENUM('open','in_progress','close','completed','cancelled') DEFAULT 'open'");
+            }
+            
+            \Log::info('Ensured ticketing_problems.status enum includes close', [
+                'driver' => $driver
+            ]);
+        } catch (\Throwable $th) {
+            \Log::error('Failed ensuring ticketing_problems.status enum includes close', [
+                'driver' => DB::getDriverName(),
+                'error' => $th->getMessage()
+            ]);
+        }
     }
 }

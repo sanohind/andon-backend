@@ -40,7 +40,7 @@ return new class extends Migration
             $table->integer('mtbf_seconds')->nullable(); // Mean Time Between Failures
             
             // Status ticketing
-            $table->enum('status', ['open', 'in_progress', 'completed', 'cancelled'])->default('open');
+            $table->enum('status', ['open', 'in_progress', 'close', 'completed', 'cancelled'])->default('open');
             
             // User yang membuat ticketing
             $table->unsignedBigInteger('created_by_user_id');

@@ -39,9 +39,20 @@ Route::prefix('dashboard')->group(function () {
     // Ticketing Problem Routes
     Route::get('/ticketing/data', [TicketingProblemController::class, 'getTicketingData']);
     Route::post('/ticketing', [TicketingProblemController::class, 'createTicketing']);
+    Route::get('/ticketing/{id}', [TicketingProblemController::class, 'getTicketingById']);
     Route::put('/ticketing/{id}', [TicketingProblemController::class, 'updateTicketing']);
     Route::get('/ticketing/problem/{problemId}', [TicketingProblemController::class, 'getTicketingByProblem']);
     Route::get('/ticketing/technicians', [TicketingProblemController::class, 'getTechnicians']);
+});
+
+// Ticketing Problem Routes (non-dashboard prefix for analytics edit modal)
+Route::prefix('ticketing')->group(function () {
+    Route::get('/data', [TicketingProblemController::class, 'getTicketingData']);
+    Route::post('/', [TicketingProblemController::class, 'createTicketing']);
+    Route::get('/{id}', [TicketingProblemController::class, 'getTicketingById'])->whereNumber('id');
+    Route::put('/{id}', [TicketingProblemController::class, 'updateTicketing'])->whereNumber('id');
+    Route::get('/problem/{problemId}', [TicketingProblemController::class, 'getTicketingByProblem'])->whereNumber('problemId');
+    Route::get('/technicians/list', [TicketingProblemController::class, 'getTechnicians']);
 });
 
 // Dashboard status route - accessible without Sanctum (uses custom auth)

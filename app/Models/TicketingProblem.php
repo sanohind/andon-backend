@@ -328,6 +328,11 @@ class TicketingProblem extends Model
      */
     public function canBeUpdatedBy($user)
     {
+        // Admin selalu bisa update
+        if ($user->role === 'admin') {
+            return true;
+        }
+        
         // User maintenance, quality, dan engineering bisa update ticketing
         if (!in_array($user->role, ['maintenance', 'quality', 'engineering'])) {
             return false;
@@ -345,7 +350,8 @@ class TicketingProblem extends Model
         $classes = [
             'open' => 'badge-warning',
             'in_progress' => 'badge-info',
-            'completed' => 'badge-success',
+            'close' => 'badge-success',
+            'completed' => 'badge-success', // Backward compatibility
             'cancelled' => 'badge-danger'
         ];
         
@@ -358,9 +364,10 @@ class TicketingProblem extends Model
     public function getStatusLabelAttribute()
     {
         $labels = [
-            'open' => 'Open',
+            'open' => 'OPEN',
             'in_progress' => 'In Progress',
-            'completed' => 'Completed',
+            'close' => 'CLOSED',
+            'completed' => 'CLOSED', // Backward compatibility
             'cancelled' => 'Cancelled'
         ];
         

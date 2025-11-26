@@ -6,10 +6,17 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\Log;
 use App\Models\TicketingProblem;
+use App\Models\InspectionTable;
 use Carbon\Carbon;
 
 class AnalyticsController extends Controller
 {
+    /**
+     * Cache untuk konversi address -> nama mesin agar tidak query berulang
+     */
+    protected $machineNameCache = [];
+    protected $machineNameLookup = null;
+
     /**
      * Menyediakan data analitik berdasarkan rentang waktu.
      */
@@ -67,7 +74,7 @@ class AnalyticsController extends Controller
         return [
             'total_problems' => $allLogs->count(), // Sekarang menghitung dari sumber yang benar
             'total_downtime_seconds' => $resolvedLogs->sum('duration_in_seconds'),
-            'most_problematic_machine' => $mostProblematicMachine ?? 'N/A',
+            'most_problematic_machine' => $mostProblematicMachine ? $this->resolveMachineName($mostProblematicMachine) : 'N/A',
             'average_resolution_time_seconds' => $resolvedLogs->avg('duration_in_seconds'),
         ];
     }
@@ -76,7 +83,9 @@ class AnalyticsController extends Controller
     {
         $data = $allLogs->groupBy('tipe_mesin')->map(fn($group) => $group->count());
         return [
-            'labels' => $data->keys(),
+            'labels' => $data->keys()
+                               ->map(fn($identifier) => $this->resolveMachineName($identifier))
+                               ->values(),
             'data' => $data->values(),
         ];
     }
@@ -85,7 +94,9 @@ class AnalyticsController extends Controller
     {
         $data = $resolvedLogs->groupBy('tipe_mesin')->map(fn($group) => $group->sum('duration_in_seconds'));
         return [
-            'labels' => $data->keys(),
+            'labels' => $data->keys()
+                               ->map(fn($identifier) => $this->resolveMachineName($identifier))
+                               ->values(),
             'data' => $data->values(),
         ];
     }
@@ -175,7 +186,7 @@ class AnalyticsController extends Controller
                     
                     $metrics['active_to_receive'][] = [
                         'problem_id' => $problem->id,
-                        'machine' => $problem->tipe_mesin,
+                        'machine' => $this->resolveMachineName($problem->tipe_mesin),
                         'problem_type' => $problem->tipe_problem,
                         'duration_seconds' => $activeToReceive,
                         'duration_formatted' => $this->formatDuration($activeToReceive)
@@ -195,7 +206,7 @@ class AnalyticsController extends Controller
                     
                     $metrics['receive_to_feedback'][] = [
                         'problem_id' => $problem->id,
-                        'machine' => $problem->tipe_mesin,
+                        'machine' => $this->resolveMachineName($problem->tipe_mesin),
                         'problem_type' => $problem->tipe_problem,
                         'duration_seconds' => $receiveToFeedback,
                         'duration_formatted' => $this->formatDuration($receiveToFeedback)
@@ -213,7 +224,7 @@ class AnalyticsController extends Controller
                     
                     $metrics['feedback_to_final'][] = [
                         'problem_id' => $problem->id,
-                        'machine' => $problem->tipe_mesin,
+                        'machine' => $this->resolveMachineName($problem->tipe_mesin),
                         'problem_type' => $problem->tipe_problem,
                         'duration_seconds' => $feedbackToFinal,
                         'duration_formatted' => $this->formatDuration($feedbackToFinal)
@@ -225,7 +236,7 @@ class AnalyticsController extends Controller
             $totalDuration = abs($resolvedTime->diffInSeconds($activeTime));
             $metrics['total_resolution'][] = [
                 'problem_id' => $problem->id,
-                'machine' => $problem->tipe_mesin,
+                'machine' => $this->resolveMachineName($problem->tipe_mesin),
                 'problem_type' => $problem->tipe_problem,
                 'duration_seconds' => $totalDuration,
                 'duration_formatted' => $this->formatDuration($totalDuration),
@@ -352,11 +363,19 @@ class AnalyticsController extends Controller
         $detailedData = [];
 
         foreach ($resolvedProblems as $problem) {
-            $activeTime = Carbon::parse($problem->timestamp);
-            $forwardTime = $problem->forwarded_at ? Carbon::parse($problem->forwarded_at) : null;
-            $receiveTime = $problem->received_at ? Carbon::parse($problem->received_at) : null;
-            $feedbackTime = $problem->feedback_resolved_at ? Carbon::parse($problem->feedback_resolved_at) : null;
-            $finalTime = Carbon::parse($problem->resolved_at);
+            $activeTime = $problem->timestamp ? Carbon::parse($problem->timestamp)->setTimezone($appTimezone) : null;
+            $forwardTime = $problem->forwarded_at ? Carbon::parse($problem->forwarded_at)->setTimezone($appTimezone) : null;
+            $receiveTime = $problem->received_at ? Carbon::parse($problem->received_at)->setTimezone($appTimezone) : null;
+            $feedbackTime = $problem->feedback_resolved_at ? Carbon::parse($problem->feedback_resolved_at)->setTimezone($appTimezone) : null;
+            $finalTime = $problem->resolved_at ? Carbon::parse($problem->resolved_at)->setTimezone($appTimezone) : null;
+
+            if (!$activeTime || !$finalTime) {
+                continue;
+            }
+
+            $formatTimestamp = function (?Carbon $time) {
+                return $time ? $time->format('d/m/Y H:i:s') : null;
+            };
 
             // Hitung durasi antar tahapan dalam menit (dibulatkan ke menit terdekat)
             $activeToForward = ($activeTime && $forwardTime && $forwardTime->gt($activeTime)) ? round($activeTime->diffInMinutes($forwardTime)) : null;
@@ -377,16 +396,16 @@ class AnalyticsController extends Controller
 
             $problemData = [
                 'problem_id' => $problem->id,
-                'machine' => $problem->tipe_mesin,
+                'machine' => $this->resolveMachineName($problem->tipe_mesin),
                 'problem_type' => $problem->tipe_problem,
                 'line_name' => $problem->line_name,
                 'flow_type' => $flowType,
                 'timestamps' => [
-                    'active_at' => $activeTime->format('Y-m-d H:i:s'),
-                    'forwarded_at' => $forwardTime ? $forwardTime->format('Y-m-d H:i:s') : null,
-                    'received_at' => $receiveTime ? $receiveTime->format('Y-m-d H:i:s') : null,
-                    'feedback_resolved_at' => $feedbackTime ? $feedbackTime->format('Y-m-d H:i:s') : null,
-                    'final_resolved_at' => $finalTime->format('Y-m-d H:i:s'),
+                    'active_at' => $formatTimestamp($activeTime),
+                    'forwarded_at' => $formatTimestamp($forwardTime),
+                    'received_at' => $formatTimestamp($receiveTime),
+                    'feedback_resolved_at' => $formatTimestamp($feedbackTime),
+                    'final_resolved_at' => $formatTimestamp($finalTime),
                 ],
                 'durations_minutes' => [
                     'active_to_forward' => $activeToForward,
@@ -591,10 +610,35 @@ class AnalyticsController extends Controller
                         }
                     };
                     
+                    // Ambil machine identifier - sama seperti forward problem
+                    $machineIdentifier = null;
+                    if ($ticketing->problem && $ticketing->problem->tipe_mesin) {
+                        $machineIdentifier = $ticketing->problem->tipe_mesin;
+                    } elseif (!empty($ticketing->metadata['machine_identifier'])) {
+                        $machineIdentifier = $ticketing->metadata['machine_identifier'];
+                    }
+                    
+                    // Resolve machine name menggunakan metode yang sama dengan forward problem
+                    // Pastikan kita selalu mendapatkan nama mesin, bukan address
+                    $machineName = $this->resolveMachineName($machineIdentifier);
+                    
+                    // Debug logging jika masih mendapatkan address
+                    if ($machineName === $machineIdentifier && $machineIdentifier) {
+                        \Log::info('Ticketing machine name resolution returned identifier', [
+                            'ticketing_id' => $ticketing->id,
+                            'problem_id' => $ticketing->problem_id,
+                            'machine_identifier' => $machineIdentifier,
+                            'resolved_name' => $machineName
+                        ]);
+                    }
+
                     return [
                         'id' => $ticketing->id,
                         'problem_id' => $ticketing->problem_id,
-                        'machine' => $ticketing->problem ? $ticketing->problem->tipe_mesin : 'Unknown',
+                        'machine' => $machineName,
+                        'machine_display_name' => $machineName,
+                        'machine_name' => $machineName,
+                        'machine_identifier' => $machineIdentifier,
                         'problem_type' => $ticketing->problem ? $ticketing->problem->tipe_problem : 'Unknown',
                         'line_name' => $ticketing->problem ? $ticketing->problem->line_name : 'Unknown',
                         'pic_technician' => $ticketing->pic_technician ?? '',
@@ -640,6 +684,9 @@ class AnalyticsController extends Controller
                         'id' => $ticketing->id ?? null,
                         'problem_id' => $ticketing->problem_id ?? null,
                         'machine' => 'Error',
+                        'machine_display_name' => 'Error',
+                        'machine_name' => 'Error',
+                        'machine_identifier' => null,
                         'problem_type' => 'Error',
                         'line_name' => 'Error',
                         'pic_technician' => '',
@@ -684,5 +731,143 @@ class AnalyticsController extends Controller
                 'count' => $ticketingData->count()
             ]
         ]);
+    }
+
+    /**
+     * Konversi identifier mesin (address/code) menjadi nama mesin human-readable
+     */
+    private function resolveMachineName(?string $identifier): string
+    {
+        if (!$identifier) {
+            return 'Unknown';
+        }
+
+        // Cache check
+        if (isset($this->machineNameCache[$identifier])) {
+            return $this->machineNameCache[$identifier];
+        }
+
+        // Build lookup table jika belum ada
+        if ($this->machineNameLookup === null) {
+            $this->machineNameLookup = $this->buildMachineNameLookup();
+        }
+
+        $normalized = mb_strtolower(trim($identifier));
+
+        // Cek di lookup table terlebih dahulu
+        if (isset($this->machineNameLookup[$normalized])) {
+            $resolvedName = $this->machineNameLookup[$normalized];
+            // Pastikan kita tidak mengembalikan address sebagai nama
+            if ($resolvedName && $resolvedName !== $identifier) {
+                return $this->machineNameCache[$identifier] = $resolvedName;
+            }
+        }
+
+        // Fallback: Query database langsung dengan berbagai variasi pencarian
+        // Ini memastikan kita selalu mendapatkan nama mesin jika ada di database
+        try {
+            $trimmedIdentifier = trim($identifier);
+            $lowerIdentifier = mb_strtolower($trimmedIdentifier);
+            
+            // Coba berbagai variasi pencarian
+            $machine = null;
+            
+            // 1. Coba dengan address (case-insensitive, trimmed)
+            $machine = InspectionTable::whereRaw('LOWER(TRIM(address)) = ?', [$lowerIdentifier])->first();
+            
+            // 2. Jika tidak ditemukan, coba exact match dengan address
+            if (!$machine) {
+                $machine = InspectionTable::where('address', $trimmedIdentifier)->first();
+            }
+            
+            // 3. Jika masih tidak ditemukan, coba dengan name (case-insensitive, trimmed)
+            if (!$machine) {
+                $machine = InspectionTable::whereRaw('LOWER(TRIM(name)) = ?', [$lowerIdentifier])->first();
+            }
+            
+            // 4. Jika masih tidak ditemukan, coba exact match dengan name
+            if (!$machine) {
+                $machine = InspectionTable::where('name', $trimmedIdentifier)->first();
+            }
+            
+            // 5. Coba dengan LIKE untuk partial match (jika identifier adalah bagian dari address atau name)
+            if (!$machine && strlen($trimmedIdentifier) > 2) {
+                $machine = InspectionTable::whereRaw('LOWER(address) LIKE ?', ['%' . $lowerIdentifier . '%'])
+                    ->orWhereRaw('LOWER(name) LIKE ?', ['%' . $lowerIdentifier . '%'])
+                    ->first();
+            }
+            
+            if ($machine) {
+                // Pastikan kita menggunakan name, bukan address
+                // Jika name kosong, gunakan address sebagai fallback (tapi ini seharusnya tidak terjadi)
+                $resolvedName = !empty($machine->name) ? $machine->name : $machine->address;
+                
+                // Pastikan resolvedName bukan identifier yang sama (untuk menghindari loop)
+                if ($resolvedName && $resolvedName !== $identifier) {
+                    // Update lookup table untuk penggunaan selanjutnya
+                    $this->machineNameLookup[$normalized] = $resolvedName;
+                    if ($machine->address) {
+                        $normalizedAddress = mb_strtolower(trim($machine->address));
+                        $this->machineNameLookup[$normalizedAddress] = $resolvedName;
+                    }
+                    // Juga cache dengan name sebagai key
+                    if ($machine->name) {
+                        $normalizedName = mb_strtolower(trim($machine->name));
+                        $this->machineNameLookup[$normalizedName] = $resolvedName;
+                    }
+                    
+                    return $this->machineNameCache[$identifier] = $resolvedName;
+                }
+            }
+        } catch (\Exception $e) {
+            \Log::warning('Error querying machine name from database', [
+                'identifier' => $identifier,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+        }
+
+        // Fallback terakhir: return identifier jika benar-benar tidak ditemukan
+        // Log warning untuk debugging
+        \Log::warning('Machine name not found for identifier - returning identifier as-is', [
+            'identifier' => $identifier,
+            'normalized' => $normalized,
+            'lookup_table_size' => count($this->machineNameLookup ?? [])
+        ]);
+        return $this->machineNameCache[$identifier] = $identifier;
+    }
+
+    /**
+     * Bangun lookup table address -> nama mesin, hanya dipanggil sekali per request
+     */
+    private function buildMachineNameLookup(): array
+    {
+        $lookup = [];
+        $tables = InspectionTable::select('name', 'address')->get();
+
+        foreach ($tables as $table) {
+            // Normalize dan simpan mapping address -> name
+            // Pastikan kita selalu menggunakan name, bukan address
+            if ($table->address) {
+                $normalizedAddress = mb_strtolower(trim($table->address));
+                // Gunakan name jika ada, jika tidak baru gunakan address sebagai fallback
+                $machineName = $table->name ?: $table->address;
+                $lookup[$normalizedAddress] = $machineName;
+            }
+
+            // Normalize dan simpan mapping name -> name (untuk pencarian langsung)
+            if ($table->name) {
+                $normalizedName = mb_strtolower(trim($table->name));
+                $lookup[$normalizedName] = $table->name;
+            }
+        }
+
+        // Log untuk debugging
+        \Log::debug('Machine name lookup table built', [
+            'total_machines' => $tables->count(),
+            'lookup_entries' => count($lookup)
+        ]);
+
+        return $lookup;
     }
 }
