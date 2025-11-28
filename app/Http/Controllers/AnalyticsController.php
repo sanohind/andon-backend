@@ -26,6 +26,8 @@ class AnalyticsController extends Controller
         $request->validate([
             'start_date' => 'required|date_format:Y-m-d',
             'end_date' => 'required|date_format:Y-m-d',
+            'division' => 'nullable|string',
+            'line_name' => 'nullable|string',
         ]);
 
         $appTimezone = config('app.timezone');
@@ -36,10 +38,31 @@ class AnalyticsController extends Controller
         // LOGIKA QUERY TERPADU YANG BARU
         // ===================================================================
         // Ambil semua log yang relevan: yang DIMULAI atau DISELESAIKAN dalam rentang waktu.
-        $allRelevantLogs = Log::where(function ($query) use ($startDate, $endDate) {
+        $query = Log::where(function ($query) use ($startDate, $endDate) {
             $query->whereBetween('timestamp', [$startDate, $endDate])
                   ->orWhereBetween('resolved_at', [$startDate, $endDate]);
-        })->get();
+        });
+        
+        // Filter berdasarkan division dan line_name jika disediakan (untuk filtering berdasarkan divisi/line)
+        if ($request->has('division') && $request->division) {
+            // Get machines in this division
+            $machineAddresses = InspectionTable::where('division', $request->division)
+                ->pluck('address')
+                ->toArray();
+            
+            if (!empty($machineAddresses)) {
+                $query->whereIn('tipe_mesin', $machineAddresses);
+            } else {
+                // Jika tidak ada mesin di division ini, return empty data
+                $query->whereRaw('1 = 0');
+            }
+        }
+        
+        if ($request->has('line_name') && $request->line_name) {
+            $query->where('line_name', $request->line_name);
+        }
+        
+        $allRelevantLogs = $query->get();
         
         // Dari semua log yang relevan, filter hanya yang sudah selesai.
         $resolvedLogs = $allRelevantLogs->where('status', 'OFF')->whereNotNull('resolved_at');
@@ -331,6 +354,8 @@ class AnalyticsController extends Controller
         $request->validate([
             'start_date' => 'required|date_format:Y-m-d',
             'end_date' => 'required|date_format:Y-m-d',
+            'division' => 'nullable|string',
+            'line_name' => 'nullable|string',
         ]);
 
         $appTimezone = config('app.timezone');
@@ -338,7 +363,7 @@ class AnalyticsController extends Controller
         $endDate = Carbon::parse($request->end_date, $appTimezone)->endOfDay()->utc();
 
         // Ambil semua problem yang sudah resolved dalam rentang waktu
-        $resolvedProblems = Log::where('status', 'OFF')
+        $query = Log::where('status', 'OFF')
             ->whereNotNull('resolved_at')
             ->where(function ($query) use ($startDate, $endDate) {
                 $query->whereBetween('timestamp', [$startDate, $endDate])
@@ -346,8 +371,28 @@ class AnalyticsController extends Controller
                       ->orWhereBetween('forwarded_at', [$startDate, $endDate])
                       ->orWhereBetween('received_at', [$startDate, $endDate])
                       ->orWhereBetween('feedback_resolved_at', [$startDate, $endDate]);
-            })
-            ->with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])
+            });
+        
+        // Filter berdasarkan division dan line_name jika disediakan (untuk filtering berdasarkan divisi/line)
+        if ($request->has('division') && $request->division) {
+            // Get machines in this division
+            $machineAddresses = InspectionTable::where('division', $request->division)
+                ->pluck('address')
+                ->toArray();
+            
+            if (!empty($machineAddresses)) {
+                $query->whereIn('tipe_mesin', $machineAddresses);
+            } else {
+                // Jika tidak ada mesin di division ini, return empty data
+                $query->whereRaw('1 = 0');
+            }
+        }
+        
+        if ($request->has('line_name') && $request->line_name) {
+            $query->where('line_name', $request->line_name);
+        }
+        
+        $resolvedProblems = $query->with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])
             ->orderBy('resolved_at', 'asc')
             ->get();
             
@@ -491,15 +536,41 @@ class AnalyticsController extends Controller
         $request->validate([
             'start_date' => 'required|date_format:Y-m-d',
             'end_date' => 'required|date_format:Y-m-d',
+            'division' => 'nullable|string',
+            'line_name' => 'nullable|string',
         ]);
 
         $appTimezone = config('app.timezone');
         $startDate = Carbon::parse($request->start_date, $appTimezone)->startOfDay()->utc();
         $endDate = Carbon::parse($request->end_date, $appTimezone)->endOfDay()->utc();
 
-        $ticketingData = TicketingProblem::with(['problem', 'createdByUser', 'updatedByUser'])
-            ->whereBetween('created_at', [$startDate, $endDate])
-            ->orderBy('created_at', 'asc')
+        $query = TicketingProblem::with(['problem', 'createdByUser', 'updatedByUser'])
+            ->whereBetween('created_at', [$startDate, $endDate]);
+        
+        // Filter berdasarkan division dan line_name jika disediakan (untuk filtering berdasarkan divisi/line)
+        if ($request->has('division') && $request->division) {
+            // Get machines in this division
+            $machineAddresses = InspectionTable::where('division', $request->division)
+                ->pluck('address')
+                ->toArray();
+            
+            if (!empty($machineAddresses)) {
+                $query->whereHas('problem', function($q) use ($machineAddresses) {
+                    $q->whereIn('tipe_mesin', $machineAddresses);
+                });
+            } else {
+                // Jika tidak ada mesin di division ini, return empty data
+                $query->whereRaw('1 = 0');
+            }
+        }
+        
+        if ($request->has('line_name') && $request->line_name) {
+            $query->whereHas('problem', function($q) use ($request) {
+                $q->where('line_name', $request->line_name);
+            });
+        }
+        
+        $ticketingData = $query->orderBy('created_at', 'asc')
             ->get()
             ->map(function($ticketing) use ($appTimezone) {
                 try {
