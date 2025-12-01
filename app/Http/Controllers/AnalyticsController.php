@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use App\Models\Log;
 use App\Models\TicketingProblem;
 use App\Models\InspectionTable;
+use App\Models\ProductionData;
 use Carbon\Carbon;
 
 class AnalyticsController extends Controller
@@ -131,6 +132,228 @@ class AnalyticsController extends Controller
             'labels' => $data->keys(),
             'data' => $data->values(),
         ];
+    }
+
+    /**
+     * Get aggregated target vs actual quantity for all lines in a division
+     */
+    public function getLineQuantityComparison(Request $request)
+    {
+        $request->validate([
+            'division' => 'nullable|string',
+            'start_date' => 'nullable|date_format:Y-m-d',
+            'end_date' => 'nullable|date_format:Y-m-d',
+        ]);
+
+        // Get available divisions
+        $availableDivisions = InspectionTable::select('division')
+            ->whereNotNull('division')
+            ->distinct()
+            ->orderBy('division')
+            ->get()
+            ->pluck('division')
+            ->filter()
+            ->values();
+
+        if ($availableDivisions->isEmpty()) {
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'divisions' => [],
+                    'division' => null,
+                    'lines' => [],
+                ]
+            ]);
+        }
+
+        $selectedDivision = $request->division ?: $availableDivisions->first();
+
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $startDate = $request->start_date ?: Carbon::now($appTimezone)->subDays(29)->format('Y-m-d');
+        $endDate = $request->end_date ?: Carbon::now($appTimezone)->format('Y-m-d');
+        $startUtc = Carbon::parse($startDate, $appTimezone)->startOfDay()->utc();
+        $endUtc = Carbon::parse($endDate, $appTimezone)->endOfDay()->utc();
+
+        // Get all lines in the selected division
+        $linesInDivision = InspectionTable::select('line_name', 'division')
+            ->where('division', $selectedDivision)
+            ->whereNotNull('line_name')
+            ->distinct()
+            ->orderBy('line_name')
+            ->get();
+
+        $linesData = [];
+
+        foreach ($linesInDivision as $lineInfo) {
+            $lineName = $lineInfo->line_name;
+            
+            $machines = InspectionTable::where('line_name', $lineName)
+                ->where('division', $selectedDivision)
+                ->orderBy('name')
+                ->get();
+
+            $totalTarget = 0;
+            $totalActual = 0;
+            $machineDetails = [];
+
+            foreach ($machines as $machine) {
+                $target = (int) ($machine->target_quantity ?? 0);
+                $actual = $this->calculateMachineActualQuantity($machine->address, $startUtc, $endUtc);
+
+                // Log for debugging if actual is 0 but target is not (might indicate data not found)
+                if ($actual == 0 && $target > 0) {
+                    \Log::info('Machine actual quantity is 0', [
+                        'machine_name' => $machine->name,
+                        'machine_address' => $machine->address,
+                        'line_name' => $lineName,
+                        'division' => $selectedDivision,
+                        'target' => $target,
+                    ]);
+                }
+
+                $totalTarget += $target;
+                $totalActual += $actual;
+
+                $machineDetails[] = [
+                    'name' => $machine->name,
+                    'address' => $machine->address,
+                    'target_quantity' => $target,
+                    'actual_quantity' => $actual,
+                ];
+            }
+
+            $linesData[] = [
+                'line_name' => $lineName,
+                'division' => $selectedDivision,
+                'total_target' => $totalTarget,
+                'total_actual' => $totalActual,
+                'machines' => $machineDetails,
+            ];
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'divisions' => $availableDivisions,
+                'division' => $selectedDivision,
+                'lines' => $linesData,
+                'period' => [
+                    'start_date' => $startDate,
+                    'end_date' => $endDate,
+                ],
+            ]
+        ]);
+    }
+
+    private function calculateMachineActualQuantity(?string $address, Carbon $startUtc, Carbon $endUtc): int
+    {
+        if (!$address) {
+            return 0;
+        }
+
+        // Normalize address: trim whitespace
+        $normalizedAddress = trim($address);
+        $lowerAddress = strtolower($normalizedAddress);
+
+        // Try multiple query strategies similar to dashboard controller
+        $startQuantity = null;
+        $endQuantity = null;
+
+        // Strategy 1: Exact match (case-sensitive)
+        $startQuantity = ProductionData::where('machine_name', $normalizedAddress)
+            ->where('timestamp', '<=', $startUtc)
+            ->orderBy('timestamp', 'desc')
+            ->value('quantity');
+
+        $endQuantity = ProductionData::where('machine_name', $normalizedAddress)
+            ->where('timestamp', '<=', $endUtc)
+            ->orderBy('timestamp', 'desc')
+            ->value('quantity');
+
+        // Strategy 2: Case-insensitive match with trim
+        if (is_null($startQuantity) || is_null($endQuantity)) {
+            $startQuantity = ProductionData::whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress])
+                ->where('timestamp', '<=', $startUtc)
+                ->orderBy('timestamp', 'desc')
+                ->value('quantity');
+
+            $endQuantity = ProductionData::whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress])
+                ->where('timestamp', '<=', $endUtc)
+                ->orderBy('timestamp', 'desc')
+                ->value('quantity');
+        }
+
+        // Strategy 3: Try with LIKE for exact match first (with wildcards for flexibility)
+        if (is_null($startQuantity) || is_null($endQuantity)) {
+            // Try exact match with LIKE (handles any whitespace variations)
+            $startQuantity = ProductionData::whereRaw('LOWER(TRIM(machine_name)) LIKE ?', [$lowerAddress])
+                ->where('timestamp', '<=', $startUtc)
+                ->orderBy('timestamp', 'desc')
+                ->value('quantity');
+
+            $endQuantity = ProductionData::whereRaw('LOWER(TRIM(machine_name)) LIKE ?', [$lowerAddress])
+                ->where('timestamp', '<=', $endUtc)
+                ->orderBy('timestamp', 'desc')
+                ->value('quantity');
+        }
+
+        // Strategy 3b: Try with partial match as last resort
+        if (is_null($startQuantity) || is_null($endQuantity)) {
+            $startRecord = ProductionData::whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%'])
+                ->where('timestamp', '<=', $startUtc)
+                ->orderBy('timestamp', 'desc')
+                ->first();
+            $startQuantity = $startRecord ? $startRecord->quantity : null;
+
+            $endRecord = ProductionData::whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%'])
+                ->where('timestamp', '<=', $endUtc)
+                ->orderBy('timestamp', 'desc')
+                ->first();
+            $endQuantity = $endRecord ? $endRecord->quantity : null;
+        }
+
+        // Strategy 4: Try using DB::table directly (same as dashboard fallback)
+        if (is_null($startQuantity) || is_null($endQuantity)) {
+            $startRecord = \DB::table('production_data')
+                ->where('machine_name', $normalizedAddress)
+                ->where('timestamp', '<=', $startUtc)
+                ->orderBy('timestamp', 'desc')
+                ->first();
+            $startQuantity = $startRecord ? $startRecord->quantity : null;
+
+            $endRecord = \DB::table('production_data')
+                ->where('machine_name', $normalizedAddress)
+                ->where('timestamp', '<=', $endUtc)
+                ->orderBy('timestamp', 'desc')
+                ->first();
+            $endQuantity = $endRecord ? $endRecord->quantity : null;
+        }
+
+        // If still not found, log for debugging and try to find what's in the database
+        if (is_null($endQuantity)) {
+            // Try to find any records with similar address for debugging
+            $similarRecords = ProductionData::whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%'])
+                ->select('machine_name', 'timestamp', 'quantity')
+                ->orderBy('timestamp', 'desc')
+                ->limit(5)
+                ->get();
+
+            \Log::warning('Production data not found for address in calculateMachineActualQuantity', [
+                'address' => $address,
+                'normalized_address' => $normalizedAddress,
+                'lower_address' => $lowerAddress,
+                'start_utc' => $startUtc->toDateTimeString(),
+                'end_utc' => $endUtc->toDateTimeString(),
+                'similar_records_found' => $similarRecords->toArray(),
+            ]);
+            return 0;
+        }
+
+        if (is_null($startQuantity)) {
+            return max(0, (int) $endQuantity);
+        }
+
+        return max(0, (int) $endQuantity - (int) $startQuantity);
     }
 
     private function calculateMTTR($resolvedLogs)
