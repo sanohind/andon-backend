@@ -45,6 +45,7 @@ class InspectionTableController extends Controller
             'line_name' => 'required|string|max:50',
             'division' => 'required|string|max:50'
         ]);
+        $validated = $this->normalizeTablePayload($validated);
 
         // Validasi unik secara manual
         $exists = InspectionTable::where('name', $validated['name'])
@@ -108,6 +109,7 @@ class InspectionTableController extends Controller
             'name' => 'required|string|max:255',
             'line_name' => 'required|string|max:50'
         ]);
+        $validated = $this->normalizeTablePayload($validated);
 
         // Validasi unik secara manual
         $exists = InspectionTable::where('name', $validated['name'])
@@ -135,6 +137,7 @@ class InspectionTableController extends Controller
             'division' => 'required|string|max:50',
             'line_name' => 'required|string|max:50'
         ]);
+        $validated = $this->normalizeTablePayload($validated);
 
         // Find inspection table by address
         $inspectionTable = InspectionTable::where('address', $address)->first();
@@ -295,6 +298,16 @@ class InspectionTableController extends Controller
                 'message' => 'Failed to update cycle threshold: ' . $e->getMessage()
             ], 500);
         }
+    }
+
+    private function normalizeTablePayload(array $payload): array
+    {
+        foreach ($payload as $key => $value) {
+            if (is_string($value)) {
+                $payload[$key] = trim($value);
+            }
+        }
+        return $payload;
     }
 
     public function metrics()

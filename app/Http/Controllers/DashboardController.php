@@ -34,6 +34,81 @@ class DashboardController extends Controller
         
         return $tables->pluck('name');
     }
+
+    private function normalizeControlledTablesInput($tablesInput)
+    {
+        if (is_null($tablesInput) || $tablesInput === '') {
+            return null;
+        }
+
+        $decoded = $tablesInput;
+        if (is_string($tablesInput)) {
+            $decoded = json_decode($tablesInput, true);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                // If the payload is not valid JSON, keep original value
+                return $tablesInput;
+            }
+        }
+
+        if (!is_array($decoded)) {
+            return $tablesInput;
+        }
+
+        $tables = InspectionTable::select('name', 'address')->get();
+        $addressLookup = [];
+        $nameLookup = [];
+
+        foreach ($tables as $table) {
+            if (!empty($table->address)) {
+                $addressLookup[strtolower(trim($table->address))] = $table->address;
+            }
+            if (!empty($table->name)) {
+                $nameLookup[strtolower(trim($table->name))] = $table->address;
+            }
+        }
+
+        $normalized = [];
+
+        foreach ($decoded as $entry) {
+            $candidateAddress = null;
+            $candidateName = null;
+
+            if (is_array($entry)) {
+                $candidateAddress = $entry['address'] ?? null;
+                $candidateName = $entry['name'] ?? null;
+            } elseif (is_string($entry)) {
+                $candidateAddress = $entry;
+            }
+
+            if ($candidateAddress) {
+                $addressKey = strtolower(trim($candidateAddress));
+                if ($addressKey !== '' && isset($addressLookup[$addressKey])) {
+                    $normalized[] = $addressLookup[$addressKey];
+                    continue;
+                }
+            }
+
+            if ($candidateName) {
+                $nameKey = strtolower(trim($candidateName));
+                if ($nameKey !== '' && isset($nameLookup[$nameKey])) {
+                    $normalized[] = $nameLookup[$nameKey];
+                    continue;
+                }
+            }
+
+            if ($candidateAddress) {
+                $normalized[] = trim($candidateAddress);
+            }
+        }
+
+        if (empty($normalized)) {
+            return json_encode([]);
+        }
+
+        $unique = array_values(array_unique(array_filter($normalized)));
+        $encoded = json_encode($unique);
+        return $encoded === false ? null : $encoded;
+    }
     /**
      * Tampilkan dashboard monitoring
      */
@@ -432,6 +507,7 @@ class DashboardController extends Controller
             $statusData = [
                 'name' => $machineName,
                 'line_name' => $lineName, // TAMBAHAN: Sertakan line_name dalam response
+                'address' => $table->address,
                 'status' => $finalStatus,
                 'color' => $finalColor,
                 'problem_type' => $problemType,
@@ -590,6 +666,7 @@ class DashboardController extends Controller
             $statusData = [
                 'name' => $machineName,
                 'line_name' => $lineName,
+                'address' => $table->address,
                 'status' => $finalStatus,
                 'color' => $finalColor,
                 'problem_type' => $problemType,
@@ -1214,6 +1291,8 @@ class DashboardController extends Controller
                 'controlled_tables' => 'nullable' // JSON string of table names
             ]);
 
+            $controlledTables = $this->normalizeControlledTablesInput($request->input('controlled_tables'));
+
             $deviceId = DB::table('device_status')->insertGetId([
                 'device_id' => $request->device_id,
                 'device_name' => $request->device_name,
@@ -1221,7 +1300,7 @@ class DashboardController extends Controller
                 'last_seen' => now(),
                 'details' => $request->details,
                 // Persist controlled tables as provided (frontend sends JSON string)
-                'controlled_tables' => $request->input('controlled_tables') ?: null,
+                'controlled_tables' => $controlledTables,
                 'created_at' => now(),
                 'updated_at' => now()
             ]);
@@ -1261,6 +1340,8 @@ class DashboardController extends Controller
                 'controlled_tables' => 'nullable' // JSON string of table names
             ]);
 
+            $controlledTables = $this->normalizeControlledTablesInput($request->input('controlled_tables'));
+
             $updated = DB::table('device_status')
                 ->where('id', $id)
                 ->update([
@@ -1269,7 +1350,7 @@ class DashboardController extends Controller
                     'status' => $request->status,
                     'details' => $request->details,
                     // Persist controlled tables as provided (frontend sends JSON string)
-                    'controlled_tables' => $request->input('controlled_tables') ?: null,
+                    'controlled_tables' => $controlledTables,
                     'updated_at' => now()
                 ]);
 

@@ -186,19 +186,19 @@ class AnalyticsController extends Controller
 
         foreach ($linesInDivision as $lineInfo) {
             $lineName = $lineInfo->line_name;
-            
-            $machines = InspectionTable::where('line_name', $lineName)
+
+        $machines = InspectionTable::where('line_name', $lineName)
                 ->where('division', $selectedDivision)
-                ->orderBy('name')
-                ->get();
+            ->orderBy('name')
+            ->get();
 
-            $totalTarget = 0;
-            $totalActual = 0;
-            $machineDetails = [];
+        $totalTarget = 0;
+        $totalActual = 0;
+        $machineDetails = [];
 
-            foreach ($machines as $machine) {
-                $target = (int) ($machine->target_quantity ?? 0);
-                $actual = $this->calculateMachineActualQuantity($machine->address, $startUtc, $endUtc);
+        foreach ($machines as $machine) {
+            $target = (int) ($machine->target_quantity ?? 0);
+            $actual = $this->calculateMachineActualQuantity($machine->address, $startUtc, $endUtc);
 
                 // Log for debugging if actual is 0 but target is not (might indicate data not found)
                 if ($actual == 0 && $target > 0) {
@@ -211,16 +211,16 @@ class AnalyticsController extends Controller
                     ]);
                 }
 
-                $totalTarget += $target;
-                $totalActual += $actual;
+            $totalTarget += $target;
+            $totalActual += $actual;
 
-                $machineDetails[] = [
-                    'name' => $machine->name,
-                    'address' => $machine->address,
-                    'target_quantity' => $target,
-                    'actual_quantity' => $actual,
-                ];
-            }
+            $machineDetails[] = [
+                'name' => $machine->name,
+                'address' => $machine->address,
+                'target_quantity' => $target,
+                'actual_quantity' => $actual,
+            ];
+        }
 
             $linesData[] = [
                 'line_name' => $lineName,
