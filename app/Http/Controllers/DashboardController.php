@@ -185,11 +185,13 @@ class DashboardController extends Controller
                     $tables = InspectionTable::where('line_name', $lineName)->get();
                     $addresses = $tables->pluck('address')->toArray();
                     
-                    // Get active problems from log table
-                    $activeProblemsFromLog = DB::table('log')
+                    // Get ALL active problems from log table (tidak di-keyBy agar bisa menghitung semua problem)
+                    // BUGFIX: Count semua problem aktif, bukan hanya unique machine
+                    $allActiveProblemsFromLog = DB::table('log')
                         ->select([
                             'log.*',
                             'inspection_tables.name as machine_name',
+                            'inspection_tables.address as machine_address',
                             'inspection_tables.line_name as table_line_name'
                         ])
                         ->join('inspection_tables', function($join) {
@@ -198,16 +200,19 @@ class DashboardController extends Controller
                         })
                         ->where('log.status', 'ON')
                         ->where('inspection_tables.line_name', $lineName)
-                        ->get()
-                        ->keyBy(function($item) {
-                            return ($item->machine_name ?? '') . '_line_' . ($item->table_line_name ?? '');
-                        });
+                        ->get();
+                    
+                    // Group active problems by address for checking machine status
+                    $activeProblemsByAddress = $allActiveProblemsFromLog->groupBy('machine_address');
                     
                     // Initialize counters
                     $runningCount = 0;
                     $idleCount = 0;
                     $stopCount = 0;
                     $cycleBasedProblemsCount = 0;
+                    
+                    // Define threshold untuk menentukan production data masih aktif (5 menit terakhir)
+                    $productionActiveThreshold = Carbon::now()->subMinutes(5);
                     
                     if (!empty($addresses)) {
                         // Get latest production data
@@ -216,7 +221,8 @@ class DashboardController extends Controller
                                 ->select([
                                     'production_data.*',
                                     'inspection_tables.name as machine_name',
-                                    'inspection_tables.line_name as table_line_name'
+                                    'inspection_tables.line_name as table_line_name',
+                                    'inspection_tables.address as machine_address'
                                 ])
                                 ->join('inspection_tables', function($join) {
                                     $join->on('production_data.machine_name', '=', 'inspection_tables.address')
@@ -226,10 +232,10 @@ class DashboardController extends Controller
                                 ->orderBy('production_data.timestamp', 'desc')
                                 ->get()
                                 ->unique(function($item) {
-                                    return ($item->machine_name ?? '') . '_line_' . ($item->table_line_name ?? 'default');
+                                    return ($item->machine_address ?? '') . '_line_' . ($item->table_line_name ?? 'default');
                                 })
                                 ->keyBy(function($item) {
-                                    return ($item->machine_name ?? '') . '_line_' . ($item->table_line_name ?? 'default');
+                                    return ($item->machine_address ?? '') . '_line_' . ($item->table_line_name ?? 'default');
                                 });
                         } catch (\Exception $e) {
                             \Log::warning('Error fetching production data for line ' . $lineName . ': ' . $e->getMessage());
@@ -238,29 +244,43 @@ class DashboardController extends Controller
                         
                         // Check each machine status
                         foreach ($tables as $table) {
+                            $machineAddress = $table->address;
                             $machineName = $table->name;
                             $lineNameTable = $table->line_name;
-                            $problemKey = $machineName . '_line_' . $lineNameTable;
-                            $productionKey = $machineName . '_line_' . $lineNameTable;
                             
-                            // Check for active problem from log
-                            $activeProblem = $activeProblemsFromLog->get($problemKey);
+                            // Use address as key for both problems and production data
+                            $problemKey = $machineAddress;
+                            $productionKey = $machineAddress . '_line_' . $lineNameTable;
+                            
+                            // Check for active problem from log (by address)
+                            $hasActiveProblem = $activeProblemsByAddress->has($machineAddress);
                             
                             // Get latest production data
                             $latestProduction = $latestProductions->get($productionKey);
                             if (!$latestProduction) {
-                                // Try to find by machine name (fallback)
-                                $latestProduction = $latestProductions->first(function($item) use ($machineName) {
-                                    return isset($item->machine_name) && $item->machine_name === $machineName;
+                                // Try to find by address directly (without line check)
+                                $latestProduction = $latestProductions->first(function($item) use ($machineAddress) {
+                                    return isset($item->machine_address) && $item->machine_address === $machineAddress;
                                 });
                             }
                             
                             // Additional fallback: try to find by address directly if still not found
                             if (!$latestProduction) {
                                 $latestProduction = DB::table('production_data')
-                                    ->where('machine_name', $table->address)
+                                    ->where('machine_name', $machineAddress)
                                     ->orderBy('timestamp', 'desc')
                                     ->first();
+                            }
+                            
+                            // Check if production data is still active (within threshold)
+                            $isProductionActive = false;
+                            if ($latestProduction) {
+                                try {
+                                    $productionTimestamp = Carbon::parse($latestProduction->timestamp);
+                                    $isProductionActive = $productionTimestamp->gte($productionActiveThreshold);
+                                } catch (\Exception $e) {
+                                    $isProductionActive = false;
+                                }
                             }
                             
                             // Check cycle-based status (with error handling)
@@ -274,8 +294,8 @@ class DashboardController extends Controller
                             }
                             
                             // Determine machine status
-                            // Priority: activeProblem > cycleBasedProblem > cycleBasedWarning > normal
-                            if ($activeProblem) {
+                            // Priority: activeProblem > cycleBasedProblem > cycleBasedWarning > normal/running
+                            if ($hasActiveProblem) {
                                 // Machine has active problem - Stop
                                 $stopCount++;
                                 if (isset($cycleBasedStatus['status']) && $cycleBasedStatus['status'] === 'problem') {
@@ -288,9 +308,12 @@ class DashboardController extends Controller
                             } elseif (isset($cycleBasedStatus['status']) && $cycleBasedStatus['status'] === 'warning') {
                                 // Cycle-based warning - Idle (quantity not increasing)
                                 $idleCount++;
-                            } elseif ($latestProduction) {
-                                // Machine has production data and no problems - Running
+                            } elseif ($isProductionActive) {
+                                // Machine has active production data (within threshold) and no problems - Running
                                 $runningCount++;
+                            } elseif ($latestProduction) {
+                                // Machine has production data but not recent (outside threshold) - Idle
+                                $idleCount++;
                             } else {
                                 // No production data - consider as Stop (offline)
                                 $stopCount++;
@@ -301,7 +324,8 @@ class DashboardController extends Controller
                         $stopCount = $totalMachines;
                     }
                     
-                    $totalActiveProblems = $activeProblemsFromLog->count() + $cycleBasedProblemsCount;
+                    // BUGFIX: Count semua problem aktif, bukan hanya unique machine
+                    $totalActiveProblems = $allActiveProblemsFromLog->count() + $cycleBasedProblemsCount;
                     
                     $divisionData['lines'][] = [
                         'name' => $lineName,

@@ -85,7 +85,7 @@
             color: #f57c00;
         }
         
-        .problem-type.material {
+        .problem-type.engineering {
             background-color: #f3e5f5;
             color: #7b1fa2;
         }
