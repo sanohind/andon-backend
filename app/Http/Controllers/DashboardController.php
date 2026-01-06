@@ -308,12 +308,10 @@ class DashboardController extends Controller
                             } elseif (isset($cycleBasedStatus['status']) && $cycleBasedStatus['status'] === 'warning') {
                                 // Cycle-based warning - Idle (quantity not increasing)
                                 $idleCount++;
-                            } elseif ($isProductionActive) {
-                                // Machine has active production data (within threshold) and no problems - Running
+                            } elseif ($isProductionActive || $latestProduction) {
+                                // Machine has production data (active or not recent) and no problems - Running
+                                // Fix: Mesin tanpa problem yang punya production data dianggap running, bukan idle
                                 $runningCount++;
-                            } elseif ($latestProduction) {
-                                // Machine has production data but not recent (outside threshold) - Idle
-                                $idleCount++;
                             } else {
                                 // No production data - consider as Stop (offline)
                                 $stopCount++;
