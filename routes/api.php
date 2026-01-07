@@ -34,6 +34,7 @@ Route::prefix('dashboard')->group(function () {
     Route::post('/problem/{id}/receive', [DashboardController::class, 'receiveProblem']);
     Route::post('/problem/{id}/feedback-resolved', [DashboardController::class, 'feedbackResolved']);
     Route::post('/problem/{id}/final-resolved', [DashboardController::class, 'finalResolved']);
+    Route::post('/problem/{id}/cancel', [DashboardController::class, 'cancelProblem']);
     Route::get('/forward-logs', [DashboardController::class, 'getForwardLogs']);
     Route::get('/forward-logs/{problemId}', [DashboardController::class, 'getForwardLogs']);
     

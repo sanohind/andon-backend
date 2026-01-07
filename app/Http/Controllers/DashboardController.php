@@ -1517,6 +1517,15 @@ class DashboardController extends Controller
             ], 400);
         }
 
+        // Validasi bahwa message wajib diisi
+        $request->validate([
+            'message' => 'required|string|min:1'
+        ], [
+            'message.required' => 'Pesan wajib diisi',
+            'message.string' => 'Pesan harus berupa teks',
+            'message.min' => 'Pesan tidak boleh kosong'
+        ]);
+
         // Tentukan target user berdasarkan tipe problem
         $targetRole = null;
         switch (strtolower($problem->tipe_problem)) {
@@ -1548,7 +1557,7 @@ class DashboardController extends Controller
             'forwarded_to_role' => $targetRole,
             'forwarded_by_user_id' => $session->id,
             'forwarded_at' => Carbon::now(config('app.timezone')),
-            'forward_message' => $request->input('message', 'Problem telah diteruskan untuk penanganan.')
+            'forward_message' => trim($request->input('message'))
         ]);
         
         // Log untuk debugging
@@ -2066,6 +2075,112 @@ class DashboardController extends Controller
                 'resolved_by' => $session->name,
                 'resolved_at' => Carbon::now(config('app.timezone'))->format('d/m/Y H:i:s'),
                 'duration_seconds' => $problem->duration_in_seconds
+            ]
+        ]);
+    }
+
+    /**
+     * Cancel problem - hanya mematikan problem tanpa menyimpan ke database/analytics
+     * Digunakan untuk mengatasi kesalahan penekanan tombol oleh operator
+     */
+    public function cancelProblem(Request $request, $id)
+    {
+        // Block write operations for management role
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
+        // Ambil token dari request header
+        $token = $request->bearerToken() ?? $request->header('Authorization');
+        if (!$token) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Token required'
+            ], 401);
+        }
+
+        // Validasi token dan ambil user data
+        try {
+            $session = DB::table('user_sessions')
+                ->join('users', 'user_sessions.user_id', '=', 'users.id')
+                ->where('user_sessions.token', str_replace('Bearer ', '', $token))
+                ->where('users.active', 1)
+                ->where('user_sessions.expires_at', '>', Carbon::now(config('app.timezone')))
+                ->select('users.id', 'users.name', 'users.role', 'users.line_name')
+                ->first();
+
+            if (!$session) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unauthorized'
+                ], 401);
+            }
+
+            // Validasi bahwa yang melakukan cancel adalah leader
+            if ($session->role !== 'leader') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Hanya leader yang dapat melakukan cancel problem.'
+                ], 403);
+            }
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Server error during authentication'
+            ], 500);
+        }
+
+        // Cari problem yang statusnya masih 'ON' berdasarkan ID
+        $problem = Log::where('id', $id)->where('status', 'ON')->first();
+
+        if (!$problem) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Problem tidak ditemukan atau sudah diselesaikan.'
+            ], 404);
+        }
+
+        // Validasi bahwa problem belum di-forward (hanya bisa cancel problem yang belum di-forward)
+        if ($problem->is_forwarded) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Problem yang sudah di-forward tidak bisa di-cancel.'
+            ], 403);
+        }
+
+        // Validasi bahwa problem adalah milik line leader ini
+        if ($session->line_name && $problem->line_name != $session->line_name) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Anda hanya bisa cancel problem di line Anda sendiri.'
+            ], 403);
+        }
+
+        // Update problem status ke OFF tanpa logging ke ForwardProblemLog atau analytics
+        $problem->status = 'OFF';
+        $problem->resolved_at = Carbon::now(config('app.timezone'));
+        
+        // Hitung durasi untuk keperluan internal saja (tidak disimpan ke analytics)
+        $timestampString = $problem->getRawOriginal('timestamp');
+        $startTime = \Carbon\Carbon::createFromFormat('Y-m-d H:i:s', $timestampString, config('app.timezone'));
+        $durationSeconds = (int) abs($problem->resolved_at->diffInSeconds($startTime));
+        
+        // Jangan set duration_in_seconds karena tidak ingin tercatat di analytics
+        // $problem->duration_in_seconds = $durationSeconds;
+        
+        $problem->save();
+
+        // TIDAK melakukan logging ke ForwardProblemLog atau analytics
+        // Ini adalah perbedaan utama dengan direct resolve
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Problem berhasil di-cancel tanpa menyimpan data ke database atau analytics.',
+            'data' => [
+                'problem_id' => $problem->id,
+                'cancelled_by' => $session->name,
+                'cancelled_at' => Carbon::now(config('app.timezone'))->format('d/m/Y H:i:s')
             ]
         ]);
     }
