@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\TicketingProblem;
 use App\Models\Log;
+use App\Models\TeknisiPic;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
@@ -335,25 +336,79 @@ class TicketingProblemController extends Controller
     }
 
     /**
-     * Get available technicians for dropdown
+     * Get available technicians for dropdown berdasarkan departement
      */
-    public function getTechnicians()
+    public function getTechnicians(Request $request)
     {
-        $technicians = [
-            'Teknisi A',
-            'Teknisi B', 
-            'Teknisi C',
-            'Teknisi D',
-            'Teknisi E',
-            'Senior Teknisi A',
-            'Senior Teknisi B',
-            'Lead Teknisi'
-        ];
+        try {
+            // Ambil token dari request header untuk mendapatkan user role
+            $token = $request->bearerToken() ?? $request->header('Authorization');
+            $userRole = null;
+            
+            if ($token) {
+                try {
+                    $cleanToken = str_replace('Bearer ', '', $token);
+                    $session = DB::table('user_sessions')
+                        ->join('users', 'user_sessions.user_id', '=', 'users.id')
+                        ->where('user_sessions.token', $cleanToken)
+                        ->where('users.active', 1)
+                        ->where('user_sessions.expires_at', '>', Carbon::now(config('app.timezone')))
+                        ->select('users.role')
+                        ->first();
 
-        return response()->json([
-            'success' => true,
-            'data' => $technicians
-        ]);
+                    if ($session) {
+                        $userRole = $session->role;
+                    }
+                } catch (\Exception $e) {
+                    \Log::error('Error getting user role for technicians: ' . $e->getMessage());
+                }
+            }
+
+            // Map user role ke departement
+            $departement = null;
+            if ($userRole === 'maintenance') {
+                $departement = 'maintenance';
+            } elseif ($userRole === 'quality') {
+                $departement = 'quality';
+            } elseif ($userRole === 'engineering') {
+                $departement = 'engineering';
+            }
+
+            // Query teknisi berdasarkan departement
+            // Jika admin atau tidak ada role, tampilkan semua teknisi
+            $query = TeknisiPic::query();
+            
+            if ($departement && $userRole !== 'admin') {
+                $query->where('departement', $departement);
+            }
+
+            $technicians = $query->orderBy('nama', 'asc')->get(['id', 'nama', 'departement']);
+
+            // Format response
+            $techniciansList = $technicians->map(function($tech) {
+                return [
+                    'id' => $tech->id,
+                    'nama' => $tech->nama,
+                    'departement' => $tech->departement
+                ];
+            })->toArray();
+
+            return response()->json([
+                'success' => true,
+                'data' => $techniciansList
+            ]);
+        } catch (\Exception $e) {
+            \Log::error('Error in getTechnicians', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'Error fetching technicians: ' . $e->getMessage(),
+                'data' => []
+            ], 500);
+        }
     }
 
     /**
@@ -396,43 +451,63 @@ class TicketingProblemController extends Controller
      */
     private function formatTicketingResponse(TicketingProblem $ticketing): array
     {
-        return [
-            'id' => $ticketing->id,
-            'problem_id' => $ticketing->problem_id,
-            'machine' => $ticketing->problem ? $ticketing->problem->tipe_mesin : 'Unknown',
-            'problem_type' => $ticketing->problem ? $ticketing->problem->tipe_problem : 'Unknown',
-            'line_name' => $ticketing->problem ? $ticketing->problem->line_name : 'Unknown',
-            'pic_technician' => $ticketing->pic_technician,
-            'diagnosis' => $ticketing->diagnosis,
-            'result_repair' => $ticketing->result_repair,
-            'status' => $ticketing->status,
-            'status_label' => $ticketing->status_label,
-            'status_badge_class' => $ticketing->status_badge_class,
-            'timestamps' => [
-                'problem_received_at' => $ticketing->formatted_problem_received_at,
-                'diagnosis_started_at' => $ticketing->formatted_diagnosis_started_at,
-                'repair_started_at' => $ticketing->formatted_repair_started_at,
-                'repair_completed_at' => $ticketing->formatted_repair_completed_at,
-                'created_at' => $ticketing->created_at ? $ticketing->created_at->format('d/m/Y H:i:s') : null,
-                'updated_at' => $ticketing->updated_at ? $ticketing->updated_at->format('d/m/Y H:i:s') : null,
-            ],
-            'durations' => [
-                'downtime' => $ticketing->formatted_downtime,
-                'mttr' => $ticketing->formatted_mttr,
-                'mttd' => $ticketing->formatted_mttd,
-                'mtbf' => $ticketing->formatted_mtbf,
-            ],
-            'durations_seconds' => [
-                'downtime_seconds' => $ticketing->downtime_seconds,
-                'mttr_seconds' => $ticketing->mttr_seconds,
-                'mttd_seconds' => $ticketing->mttd_seconds,
-                'mtbf_seconds' => $ticketing->mtbf_seconds,
-            ],
-            'users' => [
-                'created_by' => $ticketing->createdByUser ? $ticketing->createdByUser->name : 'Unknown',
-                'updated_by' => $ticketing->updatedByUser ? $ticketing->updatedByUser->name : null,
-            ],
-            'metadata' => $ticketing->metadata
-        ];
+        try {
+            // Ensure relationships are loaded
+            if (!$ticketing->relationLoaded('problem')) {
+                $ticketing->load('problem');
+            }
+            if (!$ticketing->relationLoaded('createdByUser')) {
+                $ticketing->load('createdByUser');
+            }
+            if (!$ticketing->relationLoaded('updatedByUser')) {
+                $ticketing->load('updatedByUser');
+            }
+
+            return [
+                'id' => $ticketing->id,
+                'problem_id' => $ticketing->problem_id,
+                'machine' => $ticketing->problem ? ($ticketing->problem->tipe_mesin ?? 'Unknown') : 'Unknown',
+                'problem_type' => $ticketing->problem ? ($ticketing->problem->tipe_problem ?? 'Unknown') : 'Unknown',
+                'line_name' => $ticketing->problem ? ($ticketing->problem->line_name ?? 'Unknown') : 'Unknown',
+                'pic_technician' => $ticketing->pic_technician ?? '',
+                'diagnosis' => $ticketing->diagnosis ?? '',
+                'result_repair' => $ticketing->result_repair ?? '',
+                'status' => $ticketing->status ?? 'open',
+                'status_label' => $ticketing->status_label ?? 'Open',
+                'status_badge_class' => $ticketing->status_badge_class ?? 'badge-secondary',
+                'timestamps' => [
+                    'problem_received_at' => $ticketing->formatted_problem_received_at ?? null,
+                    'diagnosis_started_at' => $ticketing->formatted_diagnosis_started_at ?? null,
+                    'repair_started_at' => $ticketing->formatted_repair_started_at ?? null,
+                    'repair_completed_at' => $ticketing->formatted_repair_completed_at ?? null,
+                    'created_at' => $ticketing->created_at ? $ticketing->created_at->format('d/m/Y H:i:s') : null,
+                    'updated_at' => $ticketing->updated_at ? $ticketing->updated_at->format('d/m/Y H:i:s') : null,
+                ],
+                'durations' => [
+                    'downtime' => $ticketing->formatted_downtime ?? '-',
+                    'mttr' => $ticketing->formatted_mttr ?? '-',
+                    'mttd' => $ticketing->formatted_mttd ?? '-',
+                    'mtbf' => $ticketing->formatted_mtbf ?? '-',
+                ],
+                'durations_seconds' => [
+                    'downtime_seconds' => $ticketing->downtime_seconds ?? null,
+                    'mttr_seconds' => $ticketing->mttr_seconds ?? null,
+                    'mttd_seconds' => $ticketing->mttd_seconds ?? null,
+                    'mtbf_seconds' => $ticketing->mtbf_seconds ?? null,
+                ],
+                'users' => [
+                    'created_by' => $ticketing->createdByUser ? ($ticketing->createdByUser->name ?? 'Unknown') : 'Unknown',
+                    'updated_by' => $ticketing->updatedByUser ? ($ticketing->updatedByUser->name ?? null) : null,
+                ],
+                'metadata' => $ticketing->metadata ?? null
+            ];
+        } catch (\Exception $e) {
+            \Log::error('Error in formatTicketingResponse', [
+                'ticketing_id' => $ticketing->id ?? null,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            throw $e;
+        }
     }
 }

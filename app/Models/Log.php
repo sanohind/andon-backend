@@ -31,6 +31,7 @@ class Log extends Model
         'forwarded_by_user_id',
         'forwarded_at',
         'forward_message',
+        'forward_photo',
         'is_received',
         'received_by_user_id',
         'received_at',

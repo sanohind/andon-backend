@@ -38,13 +38,13 @@ Route::prefix('dashboard')->group(function () {
     Route::get('/forward-logs', [DashboardController::class, 'getForwardLogs']);
     Route::get('/forward-logs/{problemId}', [DashboardController::class, 'getForwardLogs']);
     
-    // Ticketing Problem Routes
+    // Ticketing Problem Routes - More specific routes first
     Route::get('/ticketing/data', [TicketingProblemController::class, 'getTicketingData']);
     Route::post('/ticketing', [TicketingProblemController::class, 'createTicketing']);
-    Route::get('/ticketing/{id}', [TicketingProblemController::class, 'getTicketingById']);
-    Route::put('/ticketing/{id}', [TicketingProblemController::class, 'updateTicketing']);
-    Route::get('/ticketing/problem/{problemId}', [TicketingProblemController::class, 'getTicketingByProblem']);
+    Route::get('/ticketing/problem/{problemId}', [TicketingProblemController::class, 'getTicketingByProblem'])->whereNumber('problemId');
     Route::get('/ticketing/technicians', [TicketingProblemController::class, 'getTechnicians']);
+    Route::get('/ticketing/{id}', [TicketingProblemController::class, 'getTicketingById'])->whereNumber('id');
+    Route::put('/ticketing/{id}', [TicketingProblemController::class, 'updateTicketing'])->whereNumber('id');
 });
 
 // Ticketing Problem Routes (non-dashboard prefix for analytics edit modal)

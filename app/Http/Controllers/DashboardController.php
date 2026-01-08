@@ -785,6 +785,7 @@ class DashboardController extends Controller
                 'feedback_resolved_by' => null, // Will be null since we're not loading relationships
                 'feedback_resolved_at' => $problem->feedback_resolved_at ? Carbon::parse($problem->feedback_resolved_at)->format('d/m/Y H:i:s') : null,
                 'forward_message' => $problem->forward_message,
+                'forward_photo' => $problem->forward_photo ? url($problem->forward_photo) : null,
                 'feedback_message' => $problem->feedback_message
             ];
         });
@@ -1024,6 +1025,7 @@ class DashboardController extends Controller
             'feedback_resolved_by' => $problem->feedbackResolvedByUser ? $problem->feedbackResolvedByUser->name : null,
             'feedback_resolved_at' => $problem->feedback_resolved_at ? Carbon::parse($problem->feedback_resolved_at)->format('d/m/Y H:i:s') : null,
             'forward_message' => $problem->forward_message,
+            'forward_photo' => $problem->forward_photo ? url($problem->forward_photo) : null,
             'feedback_message' => $problem->feedback_message
         ];
 
@@ -1519,11 +1521,15 @@ class DashboardController extends Controller
 
         // Validasi bahwa message wajib diisi
         $request->validate([
-            'message' => 'required|string|min:1'
+            'message' => 'required|string|min:1',
+            'photo' => 'nullable|image|mimes:jpeg,jpg,png,gif|max:5120' // max 5MB
         ], [
             'message.required' => 'Pesan wajib diisi',
             'message.string' => 'Pesan harus berupa teks',
-            'message.min' => 'Pesan tidak boleh kosong'
+            'message.min' => 'Pesan tidak boleh kosong',
+            'photo.image' => 'File harus berupa gambar',
+            'photo.mimes' => 'Format gambar harus JPG, PNG, atau GIF',
+            'photo.max' => 'Ukuran foto maksimal 5MB'
         ]);
 
         // Tentukan target user berdasarkan tipe problem
@@ -1551,14 +1557,31 @@ class DashboardController extends Controller
         // Pastikan targetRole dalam lowercase untuk konsistensi
         $targetRole = strtolower(trim($targetRole));
 
+        // Handle foto upload jika ada
+        $photoPath = null;
+        if ($request->hasFile('photo')) {
+            $photo = $request->file('photo');
+            $photoName = 'forward_' . $problem->id . '_' . time() . '.' . $photo->getClientOriginalExtension();
+            $photoPath = $photo->storeAs('forward_photos', $photoName, 'public');
+            
+            // Simpan path relatif untuk akses web
+            $photoPath = 'storage/' . $photoPath;
+        }
+
         // Update problem di database
-        $problem->update([
+        $updateData = [
             'is_forwarded' => true,
             'forwarded_to_role' => $targetRole,
             'forwarded_by_user_id' => $session->id,
             'forwarded_at' => Carbon::now(config('app.timezone')),
             'forward_message' => trim($request->input('message'))
-        ]);
+        ];
+
+        if ($photoPath) {
+            $updateData['forward_photo'] = $photoPath;
+        }
+
+        $problem->update($updateData);
         
         // Log untuk debugging
         \Log::info('Problem forwarded', [
@@ -1573,12 +1596,13 @@ class DashboardController extends Controller
             'problem_id' => $problem->id,
             'machine_name' => $problem->tipe_mesin,
             'problem_type' => $problem->tipe_problem,
-                'line_name' => $problem->line_name,
+            'line_name' => $problem->line_name,
             'target_role' => $targetRole,
             'forwarded_by' => $session->name,
             'forwarded_by_id' => $session->id,
             'forwarded_at' => Carbon::now(config('app.timezone')),
-            'message' => $request->input('message', 'Problem telah diteruskan untuk penanganan.')
+            'message' => $request->input('message', 'Problem telah diteruskan untuk penanganan.'),
+            'photo_path' => $photoPath ? url($photoPath) : null
         ];
 
         // Log forward event
