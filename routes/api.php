@@ -9,6 +9,7 @@ use App\Http\Controllers\InspectionTableController;
 use App\Http\Controllers\TicketingProblemController;
 use App\Http\Controllers\PartConfigurationController;
 use App\Http\Controllers\DivisionLineController;
+use App\Http\Controllers\TeknisiPicController;
 
 // Auth Routes - TANPA PREFIX AUTH
 Route::post('/login', [AuthController::class, 'login']);
@@ -89,6 +90,12 @@ Route::get('/users', [UserController::class, 'index']);
 Route::post('/users', [UserController::class, 'store']);
 Route::put('/users/{user}', [UserController::class, 'update']);
 Route::delete('/users/{user}', [UserController::class, 'destroy']);
+
+// Teknisi PIC management routes - only accessible by admin
+Route::get('/teknisi-pic', [TeknisiPicController::class, 'index']);
+Route::post('/teknisi-pic', [TeknisiPicController::class, 'store']);
+Route::put('/teknisi-pic/{id}', [TeknisiPicController::class, 'update']);
+Route::delete('/teknisi-pic/{id}', [TeknisiPicController::class, 'destroy']);
 
 // Inspection tables routes - accessible without Sanctum (uses custom auth)
 Route::get('/inspection-tables', [InspectionTableController::class, 'index']);
