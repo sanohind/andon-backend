@@ -206,19 +206,14 @@ class AnalyticsController extends Controller
             foreach ($machines as $machine) {
                 $targetPerDay = (int) ($machine->target_quantity ?? 0);
                 $totalActual = 0;
-                
-                \Log::info("Processing machine: {$machine->name} ({$machine->address}) in line {$lineName}");
-                
+
                 foreach ($dates as $dateStr) {
                     [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
-                    $actualForDate = $this->sumMachineActualQuantityInWindow($machine->address, $startUtc, $endUtc);
-                    \Log::info("  Date {$dateStr}: actual quantity = {$actualForDate}");
+                    $actualForDate = $this->getLatestMachineQuantityInWindow($machine->address, $startUtc, $endUtc);
                     $totalActual += $actualForDate;
                 }
-                
+
                 $totalTarget = $targetPerDay * $productionDays;
-                \Log::info("  Total: actual={$totalActual}, target={$totalTarget} (target_per_day={$targetPerDay} × {$productionDays} days)");
-                
                 $machinesData[] = [
                     'name' => $machine->name,
                     'address' => $machine->address,
@@ -306,70 +301,58 @@ class AnalyticsController extends Controller
         $startUtc = $startApp->copy()->utc();
         $endUtc = $endApp->copy()->utc();
 
-        // Log untuk debugging
-        \Log::info("Shift window for {$dateStr} ({$shift}): App timezone {$startApp->toDateTimeString()} to {$endApp->toDateTimeString()}, UTC {$startUtc->toDateTimeString()} to {$endUtc->toDateTimeString()}");
-
         return [$startUtc, $endUtc];
     }
 
     /**
-     * Sum quantity aktual dari semua record di window waktu.
-     * Dibuat sesuai requirement: quantity diakumulasi dalam rentang hari produksi (07:00-06:59),
-     * bukan hanya mengambil nilai "terakhir" atau selisih start-end.
+     * Ambil quantity aktual dari record TERBARU dalam window shift.
+     * Bukan akumulasi/SUM - hanya data paling baru yang masih masuk range waktu shift.
+     * Shift pagi: 07:00-19:59 (reset jam 20:00 untuk shift malam).
+     * Shift malam: 20:00-06:59 (reset jam 07:00 untuk shift pagi berikutnya).
      */
-    private function sumMachineActualQuantityInWindow(?string $address, Carbon $startUtc, Carbon $endUtc): int
+    private function getLatestMachineQuantityInWindow(?string $address, Carbon $startUtc, Carbon $endUtc): int
     {
         if (!$address) {
             return 0;
         }
 
-        // Normalize address: trim whitespace
         $normalizedAddress = trim($address);
         $lowerAddress = strtolower($normalizedAddress);
+        $startStr = $startUtc->format('Y-m-d H:i:s');
+        $endStr = $endUtc->format('Y-m-d H:i:s');
 
-        // Log untuk debugging
-        \Log::info("Querying production data for address: {$normalizedAddress}, window: {$startUtc->toDateTimeString()} to {$endUtc->toDateTimeString()}");
-
-        // Kita lakukan beberapa strategi match machine_name, tapi hanya lanjut jika tidak ada record sama sekali.
-        // Ini menjaga akurasi untuk kasus quantity=0 yang valid.
-        // PENTING: Database timestamp disimpan dalam UTC, jadi kita query dengan UTC
-        $windowBase = function () use ($startUtc, $endUtc) {
-            // Pastikan timestamp dalam format yang benar untuk database
-            $startStr = $startUtc->format('Y-m-d H:i:s');
-            $endStr = $endUtc->format('Y-m-d H:i:s');
-            
+        $windowBase = function () use ($startStr, $endStr) {
             return ProductionData::whereRaw('timestamp >= ?', [$startStr])
-                ->whereRaw('timestamp <= ?', [$endStr]);
+                ->whereRaw('timestamp <= ?', [$endStr])
+                ->orderBy('timestamp', 'desc');
         };
 
-        // Strategy 1: Exact match
-        $q1 = $windowBase()->where('machine_name', $normalizedAddress);
-        if ($q1->limit(1)->exists()) {
-            $sum = max(0, (int) $q1->sum('quantity'));
-            $count = $q1->count();
-            \Log::info("Strategy 1 (exact match) found {$count} records, sum: {$sum}");
-            return $sum;
+        // Strategy 1: Exact match - ambil record terbaru
+        $latest = $windowBase()->where('machine_name', $normalizedAddress)->first();
+        if ($latest) {
+            return max(0, (int) $latest->quantity);
         }
 
         // Strategy 2: Case-insensitive + trim
-        $q2 = $windowBase()->whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress]);
-        if ($q2->limit(1)->exists()) {
-            $sum = max(0, (int) $q2->sum('quantity'));
-            $count = $q2->count();
-            \Log::info("Strategy 2 (case-insensitive) found {$count} records, sum: {$sum}");
-            return $sum;
+        $latest = ProductionData::whereRaw('timestamp >= ?', [$startStr])
+            ->whereRaw('timestamp <= ?', [$endStr])
+            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress])
+            ->orderBy('timestamp', 'desc')
+            ->first();
+        if ($latest) {
+            return max(0, (int) $latest->quantity);
         }
 
         // Strategy 3: Partial match (last resort)
-        $q3 = $windowBase()->whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%']);
-        if ($q3->limit(1)->exists()) {
-            $sum = max(0, (int) $q3->sum('quantity'));
-            $count = $q3->count();
-            \Log::info("Strategy 3 (partial match) found {$count} records, sum: {$sum}");
-            return $sum;
+        $latest = ProductionData::whereRaw('timestamp >= ?', [$startStr])
+            ->whereRaw('timestamp <= ?', [$endStr])
+            ->whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%'])
+            ->orderBy('timestamp', 'desc')
+            ->first();
+        if ($latest) {
+            return max(0, (int) $latest->quantity);
         }
 
-        \Log::warning("No production data found for address: {$normalizedAddress} in window {$startUtc->toDateTimeString()} to {$endUtc->toDateTimeString()}");
         return 0;
     }
 
