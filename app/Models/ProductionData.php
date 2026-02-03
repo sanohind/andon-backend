@@ -52,4 +52,10 @@ class ProductionData extends Model
         'timestamp' => 'datetime',
         'quantity' => 'integer',
     ];
+
+    /**
+     * Get the attributes that should be cast to native types.
+     * Ensure timestamp is treated as UTC in database and converted to app timezone when retrieved
+     */
+    protected $dateFormat = 'Y-m-d H:i:s';
 }

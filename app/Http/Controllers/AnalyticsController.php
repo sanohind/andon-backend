@@ -206,11 +206,19 @@ class AnalyticsController extends Controller
             foreach ($machines as $machine) {
                 $targetPerDay = (int) ($machine->target_quantity ?? 0);
                 $totalActual = 0;
+                
+                \Log::info("Processing machine: {$machine->name} ({$machine->address}) in line {$lineName}");
+                
                 foreach ($dates as $dateStr) {
                     [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
-                    $totalActual += $this->sumMachineActualQuantityInWindow($machine->address, $startUtc, $endUtc);
+                    $actualForDate = $this->sumMachineActualQuantityInWindow($machine->address, $startUtc, $endUtc);
+                    \Log::info("  Date {$dateStr}: actual quantity = {$actualForDate}");
+                    $totalActual += $actualForDate;
                 }
+                
                 $totalTarget = $targetPerDay * $productionDays;
+                \Log::info("  Total: actual={$totalActual}, target={$totalTarget} (target_per_day={$targetPerDay} × {$productionDays} days)");
+                
                 $machinesData[] = [
                     'name' => $machine->name,
                     'address' => $machine->address,
@@ -286,14 +294,22 @@ class AnalyticsController extends Controller
         $date = Carbon::parse($dateStr, $appTimezone);
 
         if ($shift === 'pagi') {
+            // Shift Pagi: 07:00 - 19:59 pada hari yang sama
             $startApp = $date->copy()->setTime(7, 0, 0);
             $endApp = $date->copy()->setTime(19, 59, 59);
         } else {
+            // Shift Malam: 20:00 hari ini - 06:59 hari berikutnya
             $startApp = $date->copy()->setTime(20, 0, 0);
             $endApp = $date->copy()->addDay()->setTime(6, 59, 59);
         }
 
-        return [$startApp->copy()->utc(), $endApp->copy()->utc()];
+        $startUtc = $startApp->copy()->utc();
+        $endUtc = $endApp->copy()->utc();
+
+        // Log untuk debugging
+        \Log::info("Shift window for {$dateStr} ({$shift}): App timezone {$startApp->toDateTimeString()} to {$endApp->toDateTimeString()}, UTC {$startUtc->toDateTimeString()} to {$endUtc->toDateTimeString()}");
+
+        return [$startUtc, $endUtc];
     }
 
     /**
@@ -311,31 +327,49 @@ class AnalyticsController extends Controller
         $normalizedAddress = trim($address);
         $lowerAddress = strtolower($normalizedAddress);
 
+        // Log untuk debugging
+        \Log::info("Querying production data for address: {$normalizedAddress}, window: {$startUtc->toDateTimeString()} to {$endUtc->toDateTimeString()}");
+
         // Kita lakukan beberapa strategi match machine_name, tapi hanya lanjut jika tidak ada record sama sekali.
         // Ini menjaga akurasi untuk kasus quantity=0 yang valid.
+        // PENTING: Database timestamp disimpan dalam UTC, jadi kita query dengan UTC
         $windowBase = function () use ($startUtc, $endUtc) {
-            return ProductionData::where('timestamp', '>=', $startUtc)
-                ->where('timestamp', '<=', $endUtc);
+            // Pastikan timestamp dalam format yang benar untuk database
+            $startStr = $startUtc->format('Y-m-d H:i:s');
+            $endStr = $endUtc->format('Y-m-d H:i:s');
+            
+            return ProductionData::whereRaw('timestamp >= ?', [$startStr])
+                ->whereRaw('timestamp <= ?', [$endStr]);
         };
 
         // Strategy 1: Exact match
         $q1 = $windowBase()->where('machine_name', $normalizedAddress);
         if ($q1->limit(1)->exists()) {
-            return max(0, (int) $q1->sum('quantity'));
+            $sum = max(0, (int) $q1->sum('quantity'));
+            $count = $q1->count();
+            \Log::info("Strategy 1 (exact match) found {$count} records, sum: {$sum}");
+            return $sum;
         }
 
         // Strategy 2: Case-insensitive + trim
         $q2 = $windowBase()->whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress]);
         if ($q2->limit(1)->exists()) {
-            return max(0, (int) $q2->sum('quantity'));
+            $sum = max(0, (int) $q2->sum('quantity'));
+            $count = $q2->count();
+            \Log::info("Strategy 2 (case-insensitive) found {$count} records, sum: {$sum}");
+            return $sum;
         }
 
         // Strategy 3: Partial match (last resort)
         $q3 = $windowBase()->whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%']);
         if ($q3->limit(1)->exists()) {
-            return max(0, (int) $q3->sum('quantity'));
+            $sum = max(0, (int) $q3->sum('quantity'));
+            $count = $q3->count();
+            \Log::info("Strategy 3 (partial match) found {$count} records, sum: {$sum}");
+            return $sum;
         }
 
+        \Log::warning("No production data found for address: {$normalizedAddress} in window {$startUtc->toDateTimeString()} to {$endUtc->toDateTimeString()}");
         return 0;
     }
 
