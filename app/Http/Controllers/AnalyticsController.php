@@ -135,17 +135,21 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Get aggregated target vs actual quantity for all lines in a division
+     * Get target vs actual quantity per mesin/meja untuk chart perbandingan.
+     * Mendukung: tanggal spesifik, bulanan (akumulasi), tahuanan (akumulasi).
+     * Shift pagi: 07:00 - 19:59 | Shift malam: 20:00 - 06:59 (hari berikutnya)
      */
     public function getLineQuantityComparison(Request $request)
     {
         $request->validate([
             'division' => 'nullable|string',
-            'start_date' => 'nullable|date_format:Y-m-d',
-            'end_date' => 'nullable|date_format:Y-m-d',
+            'period' => 'required|in:daily,monthly,yearly',
+            'date' => 'required_if:period,daily|nullable|date_format:Y-m-d',
+            'month' => 'required_if:period,monthly|nullable|date_format:Y-m',
+            'year' => 'required_if:period,yearly|nullable|date_format:Y',
+            'shift' => 'required|in:pagi,malam',
         ]);
 
-        // Get available divisions
         $availableDivisions = InspectionTable::select('division')
             ->whereNotNull('division')
             ->distinct()
@@ -167,15 +171,22 @@ class AnalyticsController extends Controller
         }
 
         $selectedDivision = $request->division ?: $availableDivisions->first();
-
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
-        $startDate = $request->start_date ?: Carbon::now($appTimezone)->subDays(29)->format('Y-m-d');
-        $endDate = $request->end_date ?: Carbon::now($appTimezone)->format('Y-m-d');
-        $startUtc = Carbon::parse($startDate, $appTimezone)->startOfDay()->utc();
-        $endUtc = Carbon::parse($endDate, $appTimezone)->endOfDay()->utc();
+        $period = $request->period;
+        $shift = $request->shift;
 
-        // Get all lines in the selected division
-        $linesInDivision = InspectionTable::select('line_name', 'division')
+        $dateRange = $this->resolveQuantityDateRange($period, $request->date, $request->month, $request->year, $appTimezone);
+        if (!$dateRange) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid date/month/year for period.',
+                'data' => ['lines' => []]
+            ], 422);
+        }
+
+        [$dates, $filterLabel, $productionDays] = $dateRange;
+
+        $linesInDivision = InspectionTable::select('line_name')
             ->where('division', $selectedDivision)
             ->whereNotNull('line_name')
             ->distinct()
@@ -183,51 +194,34 @@ class AnalyticsController extends Controller
             ->get();
 
         $linesData = [];
-
         foreach ($linesInDivision as $lineInfo) {
             $lineName = $lineInfo->line_name;
-
-        $machines = InspectionTable::where('line_name', $lineName)
+            $machines = InspectionTable::where('line_name', $lineName)
                 ->where('division', $selectedDivision)
-            ->orderBy('name')
-            ->get();
+                ->whereNotNull('address')
+                ->orderBy('name')
+                ->get();
 
-        $totalTarget = 0;
-        $totalActual = 0;
-        $machineDetails = [];
-
-        foreach ($machines as $machine) {
-            $target = (int) ($machine->target_quantity ?? 0);
-            $actual = $this->calculateMachineActualQuantity($machine->address, $startUtc, $endUtc);
-
-                // Log for debugging if actual is 0 but target is not (might indicate data not found)
-                if ($actual == 0 && $target > 0) {
-                    \Log::info('Machine actual quantity is 0', [
-                        'machine_name' => $machine->name,
-                        'machine_address' => $machine->address,
-                        'line_name' => $lineName,
-                        'division' => $selectedDivision,
-                        'target' => $target,
-                    ]);
+            $machinesData = [];
+            foreach ($machines as $machine) {
+                $targetPerDay = (int) ($machine->target_quantity ?? 0);
+                $totalActual = 0;
+                foreach ($dates as $dateStr) {
+                    [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
+                    $totalActual += $this->sumMachineActualQuantityInWindow($machine->address, $startUtc, $endUtc);
                 }
-
-            $totalTarget += $target;
-            $totalActual += $actual;
-
-            $machineDetails[] = [
-                'name' => $machine->name,
-                'address' => $machine->address,
-                'target_quantity' => $target,
-                'actual_quantity' => $actual,
-            ];
-        }
+                $totalTarget = $targetPerDay * $productionDays;
+                $machinesData[] = [
+                    'name' => $machine->name,
+                    'address' => $machine->address,
+                    'target_quantity' => $totalTarget,
+                    'actual_quantity' => $totalActual,
+                ];
+            }
 
             $linesData[] = [
                 'line_name' => $lineName,
-                'division' => $selectedDivision,
-                'total_target' => $totalTarget,
-                'total_actual' => $totalActual,
-                'machines' => $machineDetails,
+                'machines' => $machinesData,
             ];
         }
 
@@ -237,15 +231,77 @@ class AnalyticsController extends Controller
                 'divisions' => $availableDivisions,
                 'division' => $selectedDivision,
                 'lines' => $linesData,
-                'period' => [
-                    'start_date' => $startDate,
-                    'end_date' => $endDate,
+                'filter' => [
+                    'period' => $period,
+                    'period_label' => $period === 'daily' ? 'Harian' : ($period === 'monthly' ? 'Bulanan' : 'Tahunan'),
+                    'shift' => $shift,
+                    'shift_label' => $shift === 'pagi' ? 'Shift Pagi' : 'Shift Malam',
+                    'filter_label' => $filterLabel,
+                    'production_days' => $productionDays,
+                    'timezone' => $appTimezone,
                 ],
             ]
         ]);
     }
 
-    private function calculateMachineActualQuantity(?string $address, Carbon $startUtc, Carbon $endUtc): int
+    /**
+     * Resolve date range berdasarkan period.
+     * @return array|null [dates[], filter_label, production_days]
+     */
+    private function resolveQuantityDateRange(string $period, ?string $date, ?string $month, ?string $year, string $appTimezone): ?array
+    {
+        if ($period === 'daily' && $date) {
+            return [[$date], Carbon::parse($date, $appTimezone)->format('d/m/Y'), 1];
+        }
+        if ($period === 'monthly' && $month) {
+            $start = Carbon::parse($month . '-01', $appTimezone);
+            $days = $start->daysInMonth;
+            $dates = [];
+            for ($i = 1; $i <= $days; $i++) {
+                $dates[] = $start->copy()->day($i)->format('Y-m-d');
+            }
+            return [$dates, $start->translatedFormat('F Y'), $days];
+        }
+        if ($period === 'yearly' && $year) {
+            $start = Carbon::createFromFormat('Y', $year, $appTimezone);
+            $days = $start->isLeapYear() ? 366 : 365;
+            $dates = [];
+            for ($d = 0; $d < $days; $d++) {
+                $dates[] = $start->copy()->addDays($d)->format('Y-m-d');
+            }
+            return [$dates, (string) $year, $days];
+        }
+        return null;
+    }
+
+    /**
+     * Menentukan window UTC untuk shift terpilih.
+     * Shift pagi: tanggal 07:00 - tanggal 19:59
+     * Shift malam: tanggal 20:00 - tanggal+1 06:59
+     *
+     * @return array{0: Carbon, 1: Carbon}
+     */
+    private function resolveShiftWindow(string $dateStr, string $shift, string $appTimezone): array
+    {
+        $date = Carbon::parse($dateStr, $appTimezone);
+
+        if ($shift === 'pagi') {
+            $startApp = $date->copy()->setTime(7, 0, 0);
+            $endApp = $date->copy()->setTime(19, 59, 59);
+        } else {
+            $startApp = $date->copy()->setTime(20, 0, 0);
+            $endApp = $date->copy()->addDay()->setTime(6, 59, 59);
+        }
+
+        return [$startApp->copy()->utc(), $endApp->copy()->utc()];
+    }
+
+    /**
+     * Sum quantity aktual dari semua record di window waktu.
+     * Dibuat sesuai requirement: quantity diakumulasi dalam rentang hari produksi (07:00-06:59),
+     * bukan hanya mengambil nilai "terakhir" atau selisih start-end.
+     */
+    private function sumMachineActualQuantityInWindow(?string $address, Carbon $startUtc, Carbon $endUtc): int
     {
         if (!$address) {
             return 0;
@@ -255,105 +311,32 @@ class AnalyticsController extends Controller
         $normalizedAddress = trim($address);
         $lowerAddress = strtolower($normalizedAddress);
 
-        // Try multiple query strategies similar to dashboard controller
-        $startQuantity = null;
-        $endQuantity = null;
+        // Kita lakukan beberapa strategi match machine_name, tapi hanya lanjut jika tidak ada record sama sekali.
+        // Ini menjaga akurasi untuk kasus quantity=0 yang valid.
+        $windowBase = function () use ($startUtc, $endUtc) {
+            return ProductionData::where('timestamp', '>=', $startUtc)
+                ->where('timestamp', '<=', $endUtc);
+        };
 
-        // Strategy 1: Exact match (case-sensitive)
-        $startQuantity = ProductionData::where('machine_name', $normalizedAddress)
-            ->where('timestamp', '<=', $startUtc)
-            ->orderBy('timestamp', 'desc')
-            ->value('quantity');
-
-        $endQuantity = ProductionData::where('machine_name', $normalizedAddress)
-            ->where('timestamp', '<=', $endUtc)
-            ->orderBy('timestamp', 'desc')
-            ->value('quantity');
-
-        // Strategy 2: Case-insensitive match with trim
-        if (is_null($startQuantity) || is_null($endQuantity)) {
-            $startQuantity = ProductionData::whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress])
-                ->where('timestamp', '<=', $startUtc)
-                ->orderBy('timestamp', 'desc')
-                ->value('quantity');
-
-            $endQuantity = ProductionData::whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress])
-                ->where('timestamp', '<=', $endUtc)
-                ->orderBy('timestamp', 'desc')
-                ->value('quantity');
+        // Strategy 1: Exact match
+        $q1 = $windowBase()->where('machine_name', $normalizedAddress);
+        if ($q1->limit(1)->exists()) {
+            return max(0, (int) $q1->sum('quantity'));
         }
 
-        // Strategy 3: Try with LIKE for exact match first (with wildcards for flexibility)
-        if (is_null($startQuantity) || is_null($endQuantity)) {
-            // Try exact match with LIKE (handles any whitespace variations)
-            $startQuantity = ProductionData::whereRaw('LOWER(TRIM(machine_name)) LIKE ?', [$lowerAddress])
-                ->where('timestamp', '<=', $startUtc)
-                ->orderBy('timestamp', 'desc')
-                ->value('quantity');
-
-            $endQuantity = ProductionData::whereRaw('LOWER(TRIM(machine_name)) LIKE ?', [$lowerAddress])
-                ->where('timestamp', '<=', $endUtc)
-                ->orderBy('timestamp', 'desc')
-                ->value('quantity');
+        // Strategy 2: Case-insensitive + trim
+        $q2 = $windowBase()->whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress]);
+        if ($q2->limit(1)->exists()) {
+            return max(0, (int) $q2->sum('quantity'));
         }
 
-        // Strategy 3b: Try with partial match as last resort
-        if (is_null($startQuantity) || is_null($endQuantity)) {
-            $startRecord = ProductionData::whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%'])
-                ->where('timestamp', '<=', $startUtc)
-                ->orderBy('timestamp', 'desc')
-                ->first();
-            $startQuantity = $startRecord ? $startRecord->quantity : null;
-
-            $endRecord = ProductionData::whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%'])
-                ->where('timestamp', '<=', $endUtc)
-                ->orderBy('timestamp', 'desc')
-                ->first();
-            $endQuantity = $endRecord ? $endRecord->quantity : null;
+        // Strategy 3: Partial match (last resort)
+        $q3 = $windowBase()->whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%']);
+        if ($q3->limit(1)->exists()) {
+            return max(0, (int) $q3->sum('quantity'));
         }
 
-        // Strategy 4: Try using DB::table directly (same as dashboard fallback)
-        if (is_null($startQuantity) || is_null($endQuantity)) {
-            $startRecord = \DB::table('production_data')
-                ->where('machine_name', $normalizedAddress)
-                ->where('timestamp', '<=', $startUtc)
-                ->orderBy('timestamp', 'desc')
-                ->first();
-            $startQuantity = $startRecord ? $startRecord->quantity : null;
-
-            $endRecord = \DB::table('production_data')
-                ->where('machine_name', $normalizedAddress)
-                ->where('timestamp', '<=', $endUtc)
-                ->orderBy('timestamp', 'desc')
-                ->first();
-            $endQuantity = $endRecord ? $endRecord->quantity : null;
-        }
-
-        // If still not found, log for debugging and try to find what's in the database
-        if (is_null($endQuantity)) {
-            // Try to find any records with similar address for debugging
-            $similarRecords = ProductionData::whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%'])
-                ->select('machine_name', 'timestamp', 'quantity')
-                ->orderBy('timestamp', 'desc')
-                ->limit(5)
-                ->get();
-
-            \Log::warning('Production data not found for address in calculateMachineActualQuantity', [
-                'address' => $address,
-                'normalized_address' => $normalizedAddress,
-                'lower_address' => $lowerAddress,
-                'start_utc' => $startUtc->toDateTimeString(),
-                'end_utc' => $endUtc->toDateTimeString(),
-                'similar_records_found' => $similarRecords->toArray(),
-            ]);
-            return 0;
-        }
-
-        if (is_null($startQuantity)) {
-            return max(0, (int) $endQuantity);
-        }
-
-        return max(0, (int) $endQuantity - (int) $startQuantity);
+        return 0;
     }
 
     private function calculateMTTR($resolvedLogs)
