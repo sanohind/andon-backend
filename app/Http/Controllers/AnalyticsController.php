@@ -45,21 +45,18 @@ class AnalyticsController extends Controller
         });
         
         // Filter berdasarkan division dan line_name jika disediakan (untuk filtering berdasarkan divisi/line)
-        if ($request->has('division') && $request->division) {
-            // Get machines in this division
+        if ($request->filled('division')) {
             $machineAddresses = InspectionTable::where('division', $request->division)
                 ->pluck('address')
                 ->toArray();
-            
             if (!empty($machineAddresses)) {
                 $query->whereIn('tipe_mesin', $machineAddresses);
             } else {
-                // Jika tidak ada mesin di division ini, return empty data
                 $query->whereRaw('1 = 0');
             }
         }
         
-        if ($request->has('line_name') && $request->line_name) {
+        if ($request->filled('line_name')) {
             $query->where('line_name', $request->line_name);
         }
         
@@ -597,36 +594,24 @@ class AnalyticsController extends Controller
             });
         
         // Filter berdasarkan division dan line_name jika disediakan (untuk filtering berdasarkan divisi/line)
-        if ($request->has('division') && $request->division) {
-            // Get machines in this division
+        if ($request->filled('division')) {
             $machineAddresses = InspectionTable::where('division', $request->division)
                 ->pluck('address')
                 ->toArray();
-            
             if (!empty($machineAddresses)) {
                 $query->whereIn('tipe_mesin', $machineAddresses);
             } else {
-                // Jika tidak ada mesin di division ini, return empty data
                 $query->whereRaw('1 = 0');
             }
         }
         
-        if ($request->has('line_name') && $request->line_name) {
+        if ($request->filled('line_name')) {
             $query->where('line_name', $request->line_name);
         }
         
         $resolvedProblems = $query->with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])
             ->orderBy('resolved_at', 'asc')
             ->get();
-            
-        // Jika tidak ada data dalam rentang waktu, ambil semua resolved data untuk testing
-        if ($resolvedProblems->isEmpty()) {
-            $resolvedProblems = Log::where('status', 'OFF')
-                ->whereNotNull('resolved_at')
-                ->with(['forwardedByUser', 'receivedByUser', 'feedbackResolvedByUser'])
-                ->orderBy('resolved_at', 'asc')
-                ->get();
-        }
 
         $detailedData = [];
 
@@ -771,23 +756,20 @@ class AnalyticsController extends Controller
             ->whereBetween('created_at', [$startDate, $endDate]);
         
         // Filter berdasarkan division dan line_name jika disediakan (untuk filtering berdasarkan divisi/line)
-        if ($request->has('division') && $request->division) {
-            // Get machines in this division
+        if ($request->filled('division')) {
             $machineAddresses = InspectionTable::where('division', $request->division)
                 ->pluck('address')
                 ->toArray();
-            
             if (!empty($machineAddresses)) {
                 $query->whereHas('problem', function($q) use ($machineAddresses) {
                     $q->whereIn('tipe_mesin', $machineAddresses);
                 });
             } else {
-                // Jika tidak ada mesin di division ini, return empty data
                 $query->whereRaw('1 = 0');
             }
         }
         
-        if ($request->has('line_name') && $request->line_name) {
+        if ($request->filled('line_name')) {
             $query->whereHas('problem', function($q) use ($request) {
                 $q->where('line_name', $request->line_name);
             });
