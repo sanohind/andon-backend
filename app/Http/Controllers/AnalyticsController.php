@@ -206,7 +206,7 @@ class AnalyticsController extends Controller
 
                 foreach ($dates as $dateStr) {
                     [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
-                    $actualForDate = $this->getLatestMachineQuantityInWindow($machine->address, $startUtc, $endUtc);
+                    $actualForDate = $this->getLatestMachineQuantityInWindow($machine->address, $startUtc, $endUtc, $appTimezone);
                     $totalActual += $actualForDate;
                 }
 
@@ -307,7 +307,7 @@ class AnalyticsController extends Controller
      * Shift pagi: 07:00-19:59 (reset jam 20:00 untuk shift malam).
      * Shift malam: 20:00-06:59 (reset jam 07:00 untuk shift pagi berikutnya).
      */
-    private function getLatestMachineQuantityInWindow(?string $address, Carbon $startUtc, Carbon $endUtc): int
+    private function getLatestMachineQuantityInWindow(?string $address, Carbon $startUtc, Carbon $endUtc, string $appTimezone = 'Asia/Jakarta'): int
     {
         if (!$address) {
             return 0;
@@ -315,12 +315,15 @@ class AnalyticsController extends Controller
 
         $normalizedAddress = trim($address);
         $lowerAddress = strtolower($normalizedAddress);
-        $startStr = $startUtc->format('Y-m-d H:i:s');
-        $endStr = $endUtc->format('Y-m-d H:i:s');
+
+        // Sesuaikan window waktu dengan timezone aplikasi (data produksi disimpan tanpa info timezone)
+        $startLocal = $startUtc->copy()->setTimezone($appTimezone);
+        $endLocal = $endUtc->copy()->setTimezone($appTimezone);
+        $startStr = $startLocal->format('Y-m-d H:i:s');
+        $endStr = $endLocal->format('Y-m-d H:i:s');
 
         $windowBase = function () use ($startStr, $endStr) {
-            return ProductionData::whereRaw('timestamp >= ?', [$startStr])
-                ->whereRaw('timestamp <= ?', [$endStr])
+            return ProductionData::whereBetween('timestamp', [$startStr, $endStr])
                 ->orderBy('timestamp', 'desc');
         };
 
@@ -331,8 +334,7 @@ class AnalyticsController extends Controller
         }
 
         // Strategy 2: Case-insensitive + trim
-        $latest = ProductionData::whereRaw('timestamp >= ?', [$startStr])
-            ->whereRaw('timestamp <= ?', [$endStr])
+        $latest = ProductionData::whereBetween('timestamp', [$startStr, $endStr])
             ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress])
             ->orderBy('timestamp', 'desc')
             ->first();
@@ -341,8 +343,7 @@ class AnalyticsController extends Controller
         }
 
         // Strategy 3: Partial match (last resort)
-        $latest = ProductionData::whereRaw('timestamp >= ?', [$startStr])
-            ->whereRaw('timestamp <= ?', [$endStr])
+        $latest = ProductionData::whereBetween('timestamp', [$startStr, $endStr])
             ->whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%'])
             ->orderBy('timestamp', 'desc')
             ->first();
