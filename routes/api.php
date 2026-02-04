@@ -26,6 +26,7 @@ Route::prefix('dashboard')->group(function () {
     Route::get('/analytics/duration', [AnalyticsController::class, 'getProblemDurationAnalytics']);
     Route::get('/analytics/detailed-forward', [AnalyticsController::class, 'getDetailedForwardAnalyticsData']);
     Route::get('/analytics/line-quantity', [AnalyticsController::class, 'getLineQuantityComparison']);
+    Route::get('/analytics/quantity-hourly', [AnalyticsController::class, 'getQuantityHourly']);
     Route::get('/analytics/ticketing', [AnalyticsController::class, 'getTicketingAnalyticsData']);
     Route::get('/analytics', [AnalyticsController::class, 'getAnalyticsData']);
     Route::get('/plc-status', [DashboardController::class, 'getPlcStatus']);

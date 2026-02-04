@@ -8,6 +8,7 @@ use App\Models\Log;
 use App\Models\TicketingProblem;
 use App\Models\InspectionTable;
 use App\Models\ProductionData;
+use App\Models\ProductionDataHourly;
 use Carbon\Carbon;
 
 class AnalyticsController extends Controller
@@ -241,6 +242,47 @@ class AnalyticsController extends Controller
                     'timezone' => $appTimezone,
                 ],
             ]
+        ]);
+    }
+
+    /**
+     * Data quantity per jam dari production_data_hourly untuk satu mesin (grafik line per jam).
+     * Query sesuai tanggal dan shift yang dipilih.
+     */
+    public function getQuantityHourly(Request $request)
+    {
+        $request->validate([
+            'date' => 'required|date_format:Y-m-d',
+            'shift' => 'required|in:pagi,malam',
+            'machine_address' => 'required|string',
+        ]);
+
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        [$startUtc, $endUtc] = $this->resolveShiftWindow(
+            $request->date,
+            $request->shift,
+            $appTimezone
+        );
+        $startApp = $startUtc->copy()->setTimezone($appTimezone);
+        $endApp = $endUtc->copy()->setTimezone($appTimezone);
+        $startStr = $startApp->format('Y-m-d H:i:s');
+        $endStr = $endApp->format('Y-m-d H:i:s');
+
+        $address = trim($request->machine_address);
+        $rows = ProductionDataHourly::query()
+            ->where('machine_name', $address)
+            ->whereBetween('snapshot_at', [$startStr, $endStr])
+            ->orderBy('snapshot_at', 'asc')
+            ->get();
+
+        $data = $rows->map(fn ($row) => [
+            'snapshot_at' => $row->snapshot_at->format('Y-m-d H:i'),
+            'quantity' => (int) $row->quantity,
+        ])->values();
+
+        return response()->json([
+            'success' => true,
+            'data' => $data,
         ]);
     }
 
