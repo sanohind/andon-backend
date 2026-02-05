@@ -842,26 +842,14 @@ class DashboardController extends Controller
                 \Log::warning('Token validation failed in getStatusApi: ' . $e->getMessage());
             }
         }
-
-        // Hak akses manager: utamakan header dari proxy (user yang benar-benar login)
-        // agar filtering divisi benar saat Node memakai LARAVEL_API_TOKEN
-        if ($request->header('X-User-Role') !== null && $request->header('X-User-Role') !== '') {
-            $userRole = $request->header('X-User-Role');
-        }
-        if ($request->header('X-User-Division') !== null && $request->header('X-User-Division') !== '') {
-            $userDivision = $request->header('X-User-Division');
-        }
-        if ($request->header('X-Line-Name') !== null && $request->header('X-Line-Name') !== '') {
-            $userLineName = $request->header('X-Line-Name');
-        }
         
         // PERBAIKAN: Ambil line_name dari query parameter atau header untuk filtering
-        $lineName = $request->input('line_name') ?? $request->header('X-Line-Name') ?? $userLineName;
+        $lineName = $request->input('line_name') ?? $request->header('X-Line-Name');
         
         // PERBAIKAN: Ambil division dari query parameter untuk manager filtering
         $divisionFilter = $request->input('division');
         if ($divisionFilter && $userRole === 'manager') {
-            $userDivision = $divisionFilter;
+            $userDivision = $divisionFilter; // Override dengan division dari query parameter
         }
         
         // Log request for debugging
