@@ -204,19 +204,34 @@ class AnalyticsController extends Controller
             foreach ($machines as $machine) {
                 $targetPerDay = (int) ($machine->target_quantity ?? 0);
                 $totalActual = 0;
+                $totalActualRegular = 0;
 
                 foreach ($dates as $dateStr) {
                     [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
                     $actualForDate = $this->getLatestMachineQuantityInWindow($machine->address, $startUtc, $endUtc, $appTimezone);
                     $totalActual += $actualForDate;
+
+                    if ($machine->ot_enabled) {
+                        [$_, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
+                        $actualRegularForDate = $this->getLatestMachineQuantityInWindow($machine->address, $startUtc, $endRegulerUtc, $appTimezone);
+                        $totalActualRegular += $actualRegularForDate;
+                    }
                 }
 
                 $totalTarget = $targetPerDay * $productionDays;
+                $actualOt = $machine->ot_enabled ? max(0, $totalActual - $totalActualRegular) : 0;
+                $actualRegular = $machine->ot_enabled ? $totalActualRegular : $totalActual;
+                $targetOt = $machine->ot_enabled && $machine->target_ot !== null ? (int) $machine->target_ot * $productionDays : null;
+
                 $machinesData[] = [
                     'name' => $machine->name,
                     'address' => $machine->address,
                     'target_quantity' => $totalTarget,
                     'actual_quantity' => $totalActual,
+                    'actual_quantity_regular' => $actualRegular,
+                    'actual_quantity_ot' => $actualOt,
+                    'target_ot' => $targetOt,
+                    'ot_enabled' => (bool) $machine->ot_enabled,
                 ];
             }
 
@@ -342,6 +357,26 @@ class AnalyticsController extends Controller
         $endUtc = $endApp->copy()->utc();
 
         return [$startUtc, $endUtc];
+    }
+
+    /**
+     * Akhir periode reguler (sebelum OT): pagi 15:59:59, malam 04:59:59 hari berikutnya.
+     * Untuk hitung actual_quantity_regular vs actual_quantity_ot.
+     *
+     * @return array{0: Carbon, 1: Carbon} startUtc, endRegulerUtc
+     */
+    private function resolveRegulerEndForShift(string $dateStr, string $shift, string $appTimezone): array
+    {
+        [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
+        $date = Carbon::parse($dateStr, $appTimezone);
+
+        if ($shift === 'pagi') {
+            $endRegulerApp = $date->copy()->setTime(15, 59, 59);
+        } else {
+            $endRegulerApp = $date->copy()->addDay()->setTime(4, 59, 59);
+        }
+        $endRegulerUtc = $endRegulerApp->copy()->utc();
+        return [$startUtc, $endRegulerUtc];
     }
 
     /**

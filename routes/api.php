@@ -108,6 +108,7 @@ Route::put('/inspection-tables/address/{address}', [InspectionTableController::c
 Route::put('/inspection-tables/address/{address}/target', [InspectionTableController::class, 'setTarget']);
 Route::put('/inspection-tables/address/{address}/cycle', [InspectionTableController::class, 'setCycle']);
 Route::put('/inspection-tables/address/{address}/cycle-threshold', [InspectionTableController::class, 'setCycleThreshold']);
+Route::put('/inspection-tables/address/{address}/ot-settings', [InspectionTableController::class, 'setOtSettings']);
 Route::delete('/inspection-tables/{inspectionTable}', [InspectionTableController::class, 'destroy'])->whereNumber('inspectionTable');
 Route::get('/machine-status/{name}', [InspectionTableController::class, 'getMachineStatus']);
 

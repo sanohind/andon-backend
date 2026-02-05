@@ -300,6 +300,55 @@ class InspectionTableController extends Controller
         }
     }
 
+    /**
+     * Set OT (Over Time) settings for a machine: ot_enabled, ot_duration_type, target_ot.
+     * ot_duration_type: '2h_pagi' | '2h_malam' | '3.5h_pagi'
+     */
+    public function setOtSettings(Request $request, $address)
+    {
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
+        $validated = $request->validate([
+            'ot_enabled' => 'required|boolean',
+            'ot_duration_type' => 'nullable|string|in:2h_pagi,2h_malam,3.5h_pagi',
+            'target_ot' => 'nullable|integer|min:0',
+        ]);
+
+        $table = InspectionTable::where('address', $address)->first();
+        if (!$table) {
+            return response()->json(['message' => 'Inspection table with address not found.'], 404);
+        }
+
+        // PostgreSQL membutuhkan literal TRUE/FALSE untuk kolom boolean (bukan binding integer 1/0)
+        $otEnabled = filter_var($validated['ot_enabled'], FILTER_VALIDATE_BOOLEAN);
+        $otDurationType = $otEnabled ? ($validated['ot_duration_type'] ?? null) : null;
+        $targetOt = $otEnabled ? ($validated['target_ot'] ?? null) : null;
+
+        DB::table('inspection_tables')
+            ->where('id', $table->id)
+            ->update([
+                'ot_enabled' => DB::raw($otEnabled ? 'true' : 'false'),
+                'ot_duration_type' => $otDurationType,
+                'target_ot' => $targetOt,
+                'updated_at' => now(),
+            ]);
+
+        $table->refresh();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'OT settings updated',
+            'data' => [
+                'address' => $address,
+                'ot_enabled' => $table->ot_enabled,
+                'ot_duration_type' => $table->ot_duration_type,
+                'target_ot' => $table->target_ot,
+            ],
+        ]);
+    }
+
     private function normalizeTablePayload(array $payload): array
     {
         foreach ($payload as $key => $value) {
@@ -329,9 +378,12 @@ class InspectionTableController extends Controller
                 'address' => $t->address,
                 'name' => $t->name,
                 'line_name' => $t->line_name,
-                'target_quantity' => $t->target_quantity, // Ambil dari InspectionTable
+                'target_quantity' => $t->target_quantity,
                 'cycle_time' => $cycle,
                 'oee' => is_null($oee) ? null : round($oee, 2),
+                'ot_enabled' => (bool) ($t->ot_enabled ?? false),
+                'ot_duration_type' => $t->ot_duration_type,
+                'target_ot' => $t->target_ot !== null ? (int) $t->target_ot : null,
             ];
         })->values();
 

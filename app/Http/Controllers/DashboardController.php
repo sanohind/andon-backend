@@ -403,15 +403,25 @@ class DashboardController extends Controller
             $allowedLines = $mapping[$userDivision] ?? [];
             
             if (!empty($allowedLines)) {
-                if ($lineName) {
-                    // Jika line_name sudah di-filter, pastikan line tersebut ada di allowedLines
-                    if (!in_array($lineName, $allowedLines)) {
-                        $allInspectionTables->whereRaw('1 = 0'); // Return empty result
+                // Pastikan hanya memakai line yang benar-benar ada di inspection_tables
+                $existingLines = InspectionTable::whereIn('line_name', $allowedLines)
+                    ->distinct()
+                    ->pluck('line_name')
+                    ->toArray();
+                
+                if (!empty($existingLines)) {
+                    if ($lineName) {
+                        // Jika line_name sudah di-filter, pastikan line tersebut ada di allowedLines yang eksis
+                        if (!in_array($lineName, $existingLines)) {
+                            $allInspectionTables->whereRaw('1 = 0'); // Return empty result
+                        }
+                    } else {
+                        // Filter berdasarkan allowedLines yang eksis
+                        $allInspectionTables->whereIn('line_name', $existingLines);
                     }
-                } else {
-                    // Filter berdasarkan allowedLines
-                    $allInspectionTables->whereIn('line_name', $allowedLines);
                 }
+                // Jika mapping ada tapi tidak ada line yang cocok di database,
+                // jangan melakukan filter tambahan agar manager tetap melihat data.
             }
         }
         
@@ -537,7 +547,10 @@ class DashboardController extends Controller
                 'last_check' => Carbon::now(config('app.timezone'))->format('Y-m-d H:i:s'),
                 'quantity' => $latestProduction ? $latestProduction->quantity : 0,
                 'id' => $table->id,
-                'cycle_based_status' => $cycleBasedStatus // Include cycle-based status for reference
+                'cycle_based_status' => $cycleBasedStatus, // Include cycle-based status for reference
+                'ot_enabled' => (bool) ($table->ot_enabled ?? false),
+                'ot_duration_type' => $table->ot_duration_type,
+                'target_ot' => $table->target_ot !== null ? (int) $table->target_ot : null,
             ];
             
             // Only log when status is not normal (to reduce log volume)
@@ -696,7 +709,10 @@ class DashboardController extends Controller
                 'last_check' => Carbon::now(config('app.timezone'))->format('Y-m-d H:i:s'),
                 'quantity' => $latestProduction ? $latestProduction->quantity : 0,
                 'id' => $table->id,
-                'cycle_based_status' => $cycleBasedStatus // Include cycle-based status for reference
+                'cycle_based_status' => $cycleBasedStatus, // Include cycle-based status for reference
+                'ot_enabled' => (bool) ($table->ot_enabled ?? false),
+                'ot_duration_type' => $table->ot_duration_type,
+                'target_ot' => $table->target_ot !== null ? (int) $table->target_ot : null,
             ];
             
             // Only log when status is not normal (to reduce log volume)
@@ -1157,7 +1173,13 @@ class DashboardController extends Controller
             $mapping = $this->getDivisionLineMapping();
             $allowedLines = $mapping[$division] ?? [];
             if (!empty($allowedLines)) {
-                $totalMachinesQuery->whereIn('line_name', $allowedLines);
+                $existingLines = \App\Models\InspectionTable::whereIn('line_name', $allowedLines)
+                    ->distinct()
+                    ->pluck('line_name')
+                    ->toArray();
+                if (!empty($existingLines)) {
+                    $totalMachinesQuery->whereIn('line_name', $existingLines);
+                }
             }
         }
 
@@ -1169,7 +1191,13 @@ class DashboardController extends Controller
             $mapping = $this->getDivisionLineMapping();
             $allowedLines = $mapping[$division] ?? [];
             if (!empty($allowedLines)) {
-                $logQuery->whereIn('line_name', $allowedLines);
+                $existingLines = \App\Models\InspectionTable::whereIn('line_name', $allowedLines)
+                    ->distinct()
+                    ->pluck('line_name')
+                    ->toArray();
+                if (!empty($existingLines)) {
+                    $logQuery->whereIn('line_name', $existingLines);
+                }
             }
         }
         
