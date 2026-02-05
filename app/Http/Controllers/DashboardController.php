@@ -846,6 +846,12 @@ class DashboardController extends Controller
         // PERBAIKAN: Ambil line_name dari query parameter atau header untuk filtering
         $lineName = $request->input('line_name') ?? $request->header('X-Line-Name');
         
+        // PERBAIKAN: Ambil division dari query parameter untuk manager filtering
+        $divisionFilter = $request->input('division');
+        if ($divisionFilter && $userRole === 'manager') {
+            $userDivision = $divisionFilter; // Override dengan division dari query parameter
+        }
+        
         // Log request for debugging
         \Log::info('Dashboard status API called', [
             'has_token' => !empty($token),
@@ -853,11 +859,15 @@ class DashboardController extends Controller
             'user_line' => $userLineName,
             'user_division' => $userDivision,
             'line_filter' => $lineName,
+            'division_filter' => $divisionFilter,
             'ip' => $request->ip()
         ]);
 
-        // PERBAIKAN: Kirim line_name ke getMachineStatuses untuk filtering
+        // PERBAIKAN: Kirim line_name dan division ke getMachineStatuses untuk filtering
         $request->merge(['line_name' => $lineName]);
+        if ($divisionFilter) {
+            $request->merge(['division' => $divisionFilter]);
+        }
         $machineStatusesGroupedByLine = $this->getMachineStatuses($request); 
         $activeProblems = $this->getActiveProblems($request, $userRole, $userLineName, $userDivision);
         $newProblems = $this->getNewProblems($request, $userRole, $userLineName, $userDivision);
