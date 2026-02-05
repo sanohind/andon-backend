@@ -132,7 +132,8 @@ class DashboardController extends Controller
             $mapping = [];
             
             foreach ($divisions as $division) {
-                $mapping[$division->name] = $division->lines->pluck('name')->toArray();
+                $key = strtolower(trim($division->name));
+                $mapping[$key] = $division->lines->pluck('name')->toArray();
             }
             
             return $mapping;
@@ -385,6 +386,7 @@ class DashboardController extends Controller
         // Get user role and division from request or session
         $userRole = $request->input('user_role') ?? $request->header('X-User-Role');
         $userDivision = $request->input('user_division') ?? $request->header('X-User-Division');
+        $userDivisionKey = strtolower(trim((string) $userDivision));
         // PERBAIKAN: Ambil line_name dari request untuk filtering
         $lineName = $request->input('line_name') ?? $request->header('X-Line-Name');
         
@@ -398,9 +400,9 @@ class DashboardController extends Controller
         }
         
         // Filter tables based on user role and division
-        if ($userRole === 'manager' && $userDivision) {
+        if ($userRole === 'manager' && $userDivisionKey !== '') {
             $mapping = $this->getDivisionLineMapping();
-            $allowedLines = $mapping[$userDivision] ?? [];
+            $allowedLines = $mapping[$userDivisionKey] ?? [];
             
             if (!empty($allowedLines)) {
                 // Pastikan hanya memakai line yang benar-benar ada di inspection_tables
@@ -753,9 +755,10 @@ class DashboardController extends Controller
             ->where('log.status', 'ON');
             
         // Filter based on user role and division
-        if ($userRole === 'manager' && $userDivision) {
+        $userDivisionKey = strtolower(trim((string) $userDivision));
+        if ($userRole === 'manager' && $userDivisionKey !== '') {
             $mapping = $this->getDivisionLineMapping();
-            $allowedLines = $mapping[$userDivision] ?? [];
+            $allowedLines = $mapping[$userDivisionKey] ?? [];
             
             if (!empty($allowedLines)) {
                 $query->whereIn('inspection_tables.line_name', $allowedLines);
