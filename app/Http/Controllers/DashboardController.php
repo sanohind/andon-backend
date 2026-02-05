@@ -405,21 +405,24 @@ class DashboardController extends Controller
             $allowedLines = $mapping[$userDivisionKey] ?? [];
             
             if (!empty($allowedLines)) {
+                // Normalize allowed line keys
+                $allowedLineKeys = array_map(fn($v) => strtolower(trim($v)), $allowedLines);
                 // Pastikan hanya memakai line yang benar-benar ada di inspection_tables
-                $existingLines = InspectionTable::whereIn('line_name', $allowedLines)
+                $existingLines = InspectionTable::whereIn(DB::raw('lower(trim(line_name))'), $allowedLineKeys)
                     ->distinct()
                     ->pluck('line_name')
                     ->toArray();
                 
                 if (!empty($existingLines)) {
                     if ($lineName) {
-                        // Jika line_name sudah di-filter, pastikan line tersebut ada di allowedLines yang eksis
-                        if (!in_array($lineName, $existingLines)) {
+                        $lineKey = strtolower(trim($lineName));
+                        $existingKeys = array_map(fn($v) => strtolower(trim($v)), $existingLines);
+                        if (!in_array($lineKey, $existingKeys)) {
                             $allInspectionTables->whereRaw('1 = 0'); // Return empty result
                         }
                     } else {
-                        // Filter berdasarkan allowedLines yang eksis
-                        $allInspectionTables->whereIn('line_name', $existingLines);
+                        // Filter berdasarkan allowedLines yang eksis (normalize)
+                        $allInspectionTables->whereIn(DB::raw('lower(trim(line_name))'), $allowedLineKeys);
                     }
                 }
                 // Jika mapping ada tapi tidak ada line yang cocok di database,
