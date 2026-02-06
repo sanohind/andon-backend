@@ -1164,9 +1164,10 @@ class DashboardController extends Controller
         if ($lineName) {
             $totalMachinesQuery->where('line_name', $lineName);
         } elseif ($userRole === 'manager' && $division) {
-            // Filter berdasar divisi manager jika dikirim
+            // Filter berdasar divisi manager jika dikirim (normalize key untuk match mapping)
+            $divisionKey = strtolower(trim((string) $division));
             $mapping = $this->getDivisionLineMapping();
-            $allowedLines = $mapping[$division] ?? [];
+            $allowedLines = $mapping[$divisionKey] ?? [];
             if (!empty($allowedLines)) {
                 $existingLines = \App\Models\InspectionTable::whereIn('line_name', $allowedLines)
                     ->distinct()
@@ -1183,8 +1184,9 @@ class DashboardController extends Controller
         if ($lineName) {
             $logQuery->where('line_name', $lineName);
         } elseif ($userRole === 'manager' && $division) {
+            $divisionKey = strtolower(trim((string) $division));
             $mapping = $this->getDivisionLineMapping();
-            $allowedLines = $mapping[$division] ?? [];
+            $allowedLines = $mapping[$divisionKey] ?? [];
             if (!empty($allowedLines)) {
                 $existingLines = \App\Models\InspectionTable::whereIn('line_name', $allowedLines)
                     ->distinct()
