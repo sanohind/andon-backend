@@ -263,6 +263,8 @@ class AnalyticsController extends Controller
     /**
      * Data quantity per jam dari production_data_hourly untuk satu mesin (grafik line per jam).
      * Query sesuai tanggal dan shift yang dipilih.
+     * - Aktual reguler hanya sampai 15:58 (pagi) dan 04:58 (malam); 16:58 dan 05:58 ke atas = OT.
+     * - Jika ot_enabled=false: data berakhir di 15:58/04:58, selebihnya tidak ditampilkan.
      */
     public function getQuantityHourly(Request $request)
     {
@@ -273,6 +275,9 @@ class AnalyticsController extends Controller
         ]);
 
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $address = trim($request->machine_address);
+        $otEnabled = $this->getOtEnabledForMachine($address);
+
         [$startUtc, $endUtc] = $this->resolveShiftWindow(
             $request->date,
             $request->shift,
@@ -283,12 +288,19 @@ class AnalyticsController extends Controller
         $startStr = $startApp->format('Y-m-d H:i:s');
         $endStr = $endApp->format('Y-m-d H:i:s');
 
-        $address = trim($request->machine_address);
         $rows = ProductionDataHourly::query()
             ->where('machine_name', $address)
             ->whereBetween('snapshot_at', [$startStr, $endStr])
             ->orderBy('snapshot_at', 'asc')
             ->get();
+
+        // Jika OT tidak diaktifkan: tampilkan data hanya sampai 15:58 (pagi) atau 04:58 (malam)
+        if (!$otEnabled) {
+            [$_, $endRegulerUtc] = $this->resolveRegulerEndForShift($request->date, $request->shift, $appTimezone);
+            $endRegulerApp = $endRegulerUtc->copy()->setTimezone($appTimezone);
+            $endRegulerStr = $endRegulerApp->format('Y-m-d H:i:s');
+            $rows = $rows->filter(fn ($row) => $row->snapshot_at->format('Y-m-d H:i:s') <= $endRegulerStr)->values();
+        }
 
         $data = $rows->map(fn ($row) => [
             'snapshot_at' => $row->snapshot_at->format('Y-m-d H:i'),
@@ -298,7 +310,17 @@ class AnalyticsController extends Controller
         return response()->json([
             'success' => true,
             'data' => $data,
+            'ot_enabled' => $otEnabled,
         ]);
+    }
+
+    /**
+     * Ambil status ot_enabled untuk mesin dari inspection_tables berdasarkan address.
+     */
+    private function getOtEnabledForMachine(string $address): bool
+    {
+        $table = InspectionTable::where('address', $address)->first();
+        return $table ? (bool) ($table->ot_enabled ?? false) : false;
     }
 
     /**
