@@ -9,6 +9,7 @@ use App\Models\TicketingProblem;
 use App\Models\InspectionTable;
 use App\Models\ProductionData;
 use App\Models\ProductionDataHourly;
+use App\Models\BreakSchedule;
 use Carbon\Carbon;
 
 class AnalyticsController extends Controller
@@ -18,6 +19,11 @@ class AnalyticsController extends Controller
      */
     protected $machineNameCache = [];
     protected $machineNameLookup = null;
+
+    /**
+     * Cache simple untuk cycle time per mesin (address) agar tidak query berulang.
+     */
+    protected array $cycleTimeCache = [];
 
     /**
      * Menyediakan data analitik berdasarkan rentang waktu.
@@ -294,18 +300,29 @@ class AnalyticsController extends Controller
             ->orderBy('snapshot_at', 'asc')
             ->get();
 
-        // Jika OT tidak diaktifkan: tampilkan data hanya sampai 15:58 (pagi) atau 04:58 (malam)
-        if (!$otEnabled) {
-            [$_, $endRegulerUtc] = $this->resolveRegulerEndForShift($request->date, $request->shift, $appTimezone);
-            $endRegulerApp = $endRegulerUtc->copy()->setTimezone($appTimezone);
-            $endRegulerStr = $endRegulerApp->format('Y-m-d H:i:s');
-            $rows = $rows->filter(fn ($row) => $row->snapshot_at->format('Y-m-d H:i:s') <= $endRegulerStr)->values();
-        }
+        // Ambil cycle time sekali saja untuk mesin ini
+        $cycleTime = $this->getCycleTimeForMachine($address);
 
-        $data = $rows->map(fn ($row) => [
-            'snapshot_at' => $row->snapshot_at->format('Y-m-d H:i'),
-            'quantity' => (int) $row->quantity,
-        ])->values();
+        $data = $rows->map(function ($row) use ($startApp, $request, $appTimezone, $cycleTime) {
+            $snapshotAtApp = $row->snapshot_at->copy()->setTimezone($appTimezone);
+            $runningSeconds = $this->computeRunningHourSecondsForSnapshot(
+                $snapshotAtApp,
+                $startApp,
+                $request->shift,
+                $appTimezone
+            );
+
+            $idealQty = 0;
+            if ($cycleTime > 0 && $runningSeconds > 0) {
+                $idealQty = (int) floor($runningSeconds / $cycleTime);
+            }
+
+            return [
+                'snapshot_at' => $snapshotAtApp->format('Y-m-d H:i'),
+                'quantity' => (int) $row->quantity,
+                'ideal_quantity' => $idealQty,
+            ];
+        })->values();
 
         return response()->json([
             'success' => true,
@@ -321,6 +338,25 @@ class AnalyticsController extends Controller
     {
         $table = InspectionTable::where('address', $address)->first();
         return $table ? (bool) ($table->ot_enabled ?? false) : false;
+    }
+
+    /**
+     * Ambil cycle time (detik per pcs) untuk mesin berdasarkan address, dengan cache sederhana.
+     */
+    private function getCycleTimeForMachine(string $address): int
+    {
+        $key = trim($address);
+        if ($key === '') {
+            return 0;
+        }
+        if (array_key_exists($key, $this->cycleTimeCache)) {
+            return $this->cycleTimeCache[$key];
+        }
+
+        $table = InspectionTable::where('address', $key)->first();
+        $cycle = $table && $table->cycle_time ? (int) $table->cycle_time : 0;
+        $this->cycleTimeCache[$key] = $cycle;
+        return $cycle;
     }
 
     /**
@@ -379,6 +415,121 @@ class AnalyticsController extends Controller
         $endUtc = $endApp->copy()->utc();
 
         return [$startUtc, $endUtc];
+    }
+
+    /**
+     * Hitung Running Hour (detik) sampai timestamp snapshot tertentu,
+     * mengikuti logika break schedule yang sama dengan dashboard realtime.
+     */
+    private function computeRunningHourSecondsForSnapshot(
+        Carbon $snapshotAtApp,
+        Carbon $shiftStartApp,
+        string $shift,
+        string $appTimezone
+    ): int {
+        // Jika snapshot sebelum awal shift, tidak ada running hour.
+        if ($snapshotAtApp->lt($shiftStartApp)) {
+            return 0;
+        }
+
+        $elapsed = max(0, $shiftStartApp->diffInSeconds($snapshotAtApp));
+        $maxSeconds = 9 * 3600;
+
+        // Ambil jadwal kerja & istirahat untuk hari & shift ini
+        $dayOfWeek = $shiftStartApp->isoWeekday(); // 1 (Senin) - 7 (Minggu)
+        $schedule = BreakSchedule::where('day_of_week', $dayOfWeek)
+            ->where('shift', $shift)
+            ->first();
+
+        if (!$schedule || !$schedule->work_start || !$schedule->work_end) {
+            return min($elapsed, $maxSeconds);
+        }
+
+        $base = $shiftStartApp->copy()->startOfDay();
+
+        $ws = $this->parseTimeStringToHm($schedule->work_start);
+        $we = $this->parseTimeStringToHm($schedule->work_end);
+        if (!$ws || !$we) {
+            return min($elapsed, $maxSeconds);
+        }
+
+        [$wsH, $wsM] = $ws;
+        [$weH, $weM] = $we;
+
+        $workStartM = $base->copy()->setTime($wsH, $wsM, 0, 0);
+        $workEndM = $base->copy()->setTime($weH, $weM, 0, 0);
+
+        // Jika jam akhir < jam awal, berarti nyebrang hari
+        if ($weH < $wsH || ($weH === $wsH && $weM < $wsM)) {
+            $workEndM->addDay();
+        }
+
+        $effectiveStart = $shiftStartApp->greaterThan($workStartM) ? $shiftStartApp->copy() : $workStartM;
+        $effectiveEnd = $snapshotAtApp->lessThan($workEndM) ? $snapshotAtApp->copy() : $workEndM;
+
+        if ($effectiveEnd->lte($effectiveStart)) {
+            return 0;
+        }
+
+        $runningSec = max(0, $effectiveStart->diffInSeconds($effectiveEnd));
+
+        // Kurangi durasi istirahat yang overlap
+        $breaks = $schedule->getBreaksArray();
+        $isMalam = $shift === 'malam';
+        foreach ($breaks as $b) {
+            $bs = $this->parseTimeStringToHm($b['start'] ?? null);
+            $be = $this->parseTimeStringToHm($b['end'] ?? null);
+            if (!$bs || !$be) {
+                continue;
+            }
+            [$bsH, $bsM] = $bs;
+            [$beH, $beM] = $be;
+
+            $breakStartM = $base->copy()->setTime($bsH, $bsM, 0, 0);
+            $breakEndM = $base->copy()->setTime($beH, $beM, 0, 0);
+
+            if ($isMalam && $bsH < 12) {
+                // Untuk shift malam, jam < 12 dianggap hari+1
+                $breakStartM->addDay();
+                $breakEndM->addDay();
+            } elseif ($beH < $bsH || ($beH === $bsH && $beM < $bsM)) {
+                $breakEndM->addDay();
+            }
+
+            // Hitung overlap antara window kerja efektif dan window break
+            $overStart = $effectiveStart->greaterThan($breakStartM) ? $effectiveStart : $breakStartM;
+            $overEnd = $effectiveEnd->lessThan($breakEndM) ? $effectiveEnd : $breakEndM;
+
+            if ($overEnd->gt($overStart)) {
+                $overSec = max(0, $overStart->diffInSeconds($overEnd));
+                $runningSec -= $overSec;
+            }
+        }
+
+        $runningSec = max(0, $runningSec);
+        return min($runningSec, $maxSeconds);
+    }
+
+    /**
+     * Parse string waktu seperti "HH:MM" atau "HH:MM:SS" menjadi [h, m].
+     */
+    private function parseTimeStringToHm(?string $time): ?array
+    {
+        if (!$time) {
+            return null;
+        }
+        $time = trim($time);
+        // Ambil hanya HH:MM dari HH:MM:SS
+        $parts = explode(':', $time);
+        if (count($parts) < 2) {
+            return null;
+        }
+        $h = (int) $parts[0];
+        $m = (int) $parts[1];
+        if ($h < 0 || $h > 23 || $m < 0 || $m > 59) {
+            return null;
+        }
+        return [$h, $m];
     }
 
     /**
