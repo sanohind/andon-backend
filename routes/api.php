@@ -10,6 +10,7 @@ use App\Http\Controllers\TicketingProblemController;
 use App\Http\Controllers\PartConfigurationController;
 use App\Http\Controllers\DivisionLineController;
 use App\Http\Controllers\TeknisiPicController;
+use App\Http\Controllers\BreakScheduleController;
 
 // Auth Routes - TANPA PREFIX AUTH
 Route::post('/login', [AuthController::class, 'login']);
@@ -111,6 +112,10 @@ Route::put('/inspection-tables/address/{address}/cycle-threshold', [InspectionTa
 Route::put('/inspection-tables/address/{address}/ot-settings', [InspectionTableController::class, 'setOtSettings']);
 Route::delete('/inspection-tables/{inspectionTable}', [InspectionTableController::class, 'destroy'])->whereNumber('inspectionTable');
 Route::get('/machine-status/{name}', [InspectionTableController::class, 'getMachineStatus']);
+
+// Break schedules (jam kerja & istirahat) - GET untuk semua, PUT hanya admin
+Route::get('/break-schedules', [BreakScheduleController::class, 'index']);
+Route::put('/break-schedules', [BreakScheduleController::class, 'update']);
 
 // Part configurations routes - accessible without Sanctum (uses custom auth)
 Route::get('/part-configurations', [PartConfigurationController::class, 'index']);
