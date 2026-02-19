@@ -8,6 +8,7 @@ use App\Models\InspectionTable;
 use App\Models\ForwardProblemLog;
 use App\Models\Division;
 use App\Models\Line;
+use App\Services\RealtimeOeeService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -814,7 +815,22 @@ class DashboardController extends Controller
     }
 
     /**
-     * API endpoint untuk real-time monitoring (AJAX) dengan role-based visibility
+     * API endpoint waktu server (untuk sinkronisasi global Run Time & Running Hour di semua device).
+     */
+    public function serverTime(Request $request)
+    {
+        $tz = config('app.timezone', 'Asia/Jakarta');
+        $now = Carbon::now($tz);
+        return response()->json([
+            'success' => true,
+            'server_time' => $now->toIso8601String(),
+            'timezone' => $tz,
+        ]);
+    }
+
+    /**
+     * API endpoint untuk real-time monitoring (AJAX) dengan role-based visibility.
+     * Menyertakan runtime_seconds dan running_hour_seconds per mesin (dihitung dengan waktu server).
      */
     public function getStatusApi(Request $request)
     {
@@ -856,6 +872,37 @@ class DashboardController extends Controller
         $machineStatusesGroupedByLine = $this->getMachineStatuses($request); 
         $activeProblems = $this->getActiveProblems($request, $userRole, $userLineName, $userDivision);
         $newProblems = $this->getNewProblems($request, $userRole, $userLineName, $userDivision);
+
+        $appTz = config('app.timezone', 'Asia/Jakarta');
+        $serverNow = Carbon::now($appTz);
+        $realtimeService = new RealtimeOeeService();
+        $shiftInfo = $realtimeService->getShiftInfo($serverNow);
+        $shiftKey = $shiftInfo['shiftKey'];
+        $shiftStart = $shiftInfo['shiftStart'];
+        $runningHourSeconds = $realtimeService->computeRunningHourSeconds($serverNow, $shiftStart, $shiftInfo['shift']);
+
+        foreach ($machineStatusesGroupedByLine as $line => $machines) {
+            foreach ($machines as $idx => $statusData) {
+                $addr = $statusData['address'] ?? $statusData['name'] ?? null;
+                if ($addr === null) {
+                    continue;
+                }
+                try {
+                    $runtimeSeconds = $realtimeService->updateAndGetRuntime(
+                        $addr,
+                        $shiftKey,
+                        $shiftStart,
+                        $statusData,
+                        $serverNow
+                    );
+                } catch (\Throwable $e) {
+                    $runtimeSeconds = 0;
+                    \Log::warning("RealtimeOee runtime update failed for {$addr}: " . $e->getMessage());
+                }
+                $machineStatusesGroupedByLine[$line][$idx]['runtime_seconds'] = $runtimeSeconds;
+                $machineStatusesGroupedByLine[$line][$idx]['running_hour_seconds'] = $runningHourSeconds;
+            }
+        }
         
         return response()->json([
             'success' => true,
@@ -866,7 +913,9 @@ class DashboardController extends Controller
                 'user_role' => $userRole,
                 'user_line_name' => $userLineName,
                 'user_division' => $userDivision,
-                'timestamp' => Carbon::now(config('app.timezone'))->format('Y-m-d H:i:s')
+                'timestamp' => $serverNow->format('Y-m-d H:i:s'),
+                'server_time' => $serverNow->toIso8601String(),
+                'shift_key' => $shiftKey,
             ]
         ]);
     }
