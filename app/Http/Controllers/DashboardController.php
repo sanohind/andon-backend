@@ -8,6 +8,8 @@ use App\Models\InspectionTable;
 use App\Models\ForwardProblemLog;
 use App\Models\Division;
 use App\Models\Line;
+use App\Models\MachineRuntimeState;
+use App\Models\BreakSchedule;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -465,7 +467,21 @@ class DashboardController extends Controller
             });
 
         // Ambil data produksi terbaru dengan JOIN ke inspection_tables untuk mendapatkan address
-        $addresses = $allInspectionTables->pluck('address')->toArray();
+        $addresses = $allInspectionTables->pluck('address')->filter()->toArray();
+        
+        // OPTIMASI: Batch load semua runtime states sekaligus untuk shift saat ini
+        $now = Carbon::now(config('app.timezone'));
+        $shiftInfo = $this->getShiftInfo($now);
+        $runtimeStates = collect();
+        if (!empty($addresses)) {
+            $runtimeStates = MachineRuntimeState::where('shift_key', $shiftInfo['shiftKey'])
+                ->whereIn('machine_address', $addresses)
+                ->get()
+                ->keyBy(function ($s) {
+                    return trim((string) $s->machine_address);
+                });
+        }
+            
         $latestProductions = DB::table('production_data')
             ->select([
                 'production_data.*',
@@ -541,14 +557,58 @@ class DashboardController extends Controller
                 $finalColor = 'yellow';
             }
 
+            // Hitung runtime dan running hour untuk mesin ini (dengan state yang sudah di-load)
+            $runtimeSeconds = 0;
+            $runningHourSeconds = 0;
+            $machineAddress = trim($table->address ?? '');
+            if ($machineAddress) {
+                try {
+                    $runtimeData = $this->computeRuntimeSecondsOptimized(
+                        $machineAddress,
+                        $now,
+                        $shiftInfo['shiftStart'],
+                        $shiftInfo['shift'],
+                        $shiftInfo['shiftKey'],
+                        $finalStatus,
+                        $problemType,
+                        $timestamp,
+                        $runtimeStates->get($machineAddress)
+                    );
+                    $runtimeSeconds = $runtimeData['runtime_seconds'];
+                    $runningHourSeconds = $runtimeData['running_hour_seconds'];
+                    // Update runtimeStates dengan state yang baru (untuk batch save nanti)
+                    $runtimeStates->put($machineAddress, $runtimeData['state']);
+                } catch (\Throwable $e) {
+                    \Log::warning('Runtime calculation failed for machine ' . $machineAddress . ': ' . $e->getMessage(), [
+                        'trace' => $e->getTraceAsString(),
+                    ]);
+                    // Fallback: running hour saja (runtime 0 agar dashboard tidak error)
+                    try {
+                        $runningHourSeconds = $this->computeRunningHourSeconds($now, $shiftInfo['shiftStart'], $shiftInfo['shift']);
+                    } catch (\Throwable $e2) {
+                        \Log::warning('Running hour calculation also failed: ' . $e2->getMessage());
+                    }
+                }
+            } else {
+                // Jika address kosong, hitung running hour saja
+                try {
+                    $runningHourSeconds = $this->computeRunningHourSeconds($now, $shiftInfo['shiftStart'], $shiftInfo['shift']);
+                } catch (\Throwable $e) {
+                    \Log::warning('Running hour calculation failed for machine without address: ' . $e->getMessage());
+                }
+            }
+
             $statusData = [
                 'name' => $machineName,
                 'line_name' => $lineName, // TAMBAHAN: Sertakan line_name dalam response
                 'address' => $table->address,
+                'machine_address' => $table->address, // Untuk kompatibilitas dengan frontend
                 'status' => $finalStatus,
                 'color' => $finalColor,
                 'problem_type' => $problemType,
+                'tipe_problem' => $problemType, // Untuk kompatibilitas dengan frontend
                 'timestamp' => $timestamp,
+                'problem_timestamp' => $timestamp, // Untuk kompatibilitas dengan frontend
                 'last_check' => Carbon::now(config('app.timezone'))->format('Y-m-d H:i:s'),
                 'quantity' => $latestProduction ? $latestProduction->quantity : 0,
                 'id' => $table->id,
@@ -556,6 +616,8 @@ class DashboardController extends Controller
                 'ot_enabled' => (bool) ($table->ot_enabled ?? false),
                 'ot_duration_type' => $table->ot_duration_type,
                 'target_ot' => $table->target_ot !== null ? (int) $table->target_ot : null,
+                'runtime_seconds' => $runtimeSeconds,
+                'running_hour_seconds' => $runningHourSeconds,
             ];
             
             // Only log when status is not normal (to reduce log volume)
@@ -571,6 +633,28 @@ class DashboardController extends Controller
                 $groupedStatuses[$lineName] = [];
             }
             $groupedStatuses[$lineName][] = $statusData;
+        }
+        
+        // OPTIMASI: Batch save semua runtime states yang berubah setelah semua mesin diproses
+        try {
+            if ($runtimeStates && $runtimeStates->isNotEmpty()) {
+                foreach ($runtimeStates as $state) {
+                    if ($state instanceof MachineRuntimeState && ($state->isDirty() || !$state->exists)) {
+                        try {
+                            $state->save();
+                        } catch (\Throwable $saveError) {
+                            \Log::warning('Error saving individual runtime state: ' . $saveError->getMessage(), [
+                                'machine_address' => $state->machine_address ?? 'unknown',
+                                'shift_key' => $state->shift_key ?? 'unknown',
+                            ]);
+                        }
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            \Log::warning('Error batch saving runtime states (getMachineStatuses): ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+            ]);
         }
         
         return $groupedStatuses;
@@ -607,7 +691,20 @@ class DashboardController extends Controller
             });
 
         // Ambil data produksi terbaru dengan JOIN ke inspection_tables untuk mendapatkan address
-        $addresses = $allInspectionTables->pluck('address')->toArray();
+        $addresses = $allInspectionTables->pluck('address')->filter()->toArray();
+        
+        // OPTIMASI: Batch load semua runtime states sekaligus untuk shift saat ini
+        $now = Carbon::now(config('app.timezone'));
+        $shiftInfo = $this->getShiftInfo($now);
+        $runtimeStates = collect();
+        if (!empty($addresses)) {
+            $runtimeStates = MachineRuntimeState::where('shift_key', $shiftInfo['shiftKey'])
+                ->whereIn('machine_address', $addresses)
+                ->get()
+                ->keyBy(function ($s) {
+                    return trim((string) $s->machine_address);
+                });
+        }
         $latestProductions = DB::table('production_data')
             ->select([
                 'production_data.*',
@@ -703,14 +800,55 @@ class DashboardController extends Controller
                 }
             }
 
+            // Hitung runtime dan running hour untuk mesin ini (dengan state yang sudah di-load)
+            $runtimeSeconds = 0;
+            $runningHourSeconds = 0;
+            $machineAddress = trim($table->address ?? '');
+            if ($machineAddress) {
+                try {
+                    $runtimeData = $this->computeRuntimeSecondsOptimized(
+                        $machineAddress,
+                        $now,
+                        $shiftInfo['shiftStart'],
+                        $shiftInfo['shift'],
+                        $shiftInfo['shiftKey'],
+                        $finalStatus,
+                        $problemType,
+                        $timestamp,
+                        $runtimeStates->get($machineAddress)
+                    );
+                    $runtimeSeconds = $runtimeData['runtime_seconds'];
+                    $runningHourSeconds = $runtimeData['running_hour_seconds'];
+                    $runtimeStates->put($machineAddress, $runtimeData['state']);
+                } catch (\Throwable $e) {
+                    \Log::warning('Runtime calculation failed (role-filtered) for ' . $machineAddress . ': ' . $e->getMessage(), [
+                        'trace' => $e->getTraceAsString(),
+                    ]);
+                    try {
+                        $runningHourSeconds = $this->computeRunningHourSeconds($now, $shiftInfo['shiftStart'], $shiftInfo['shift']);
+                    } catch (\Throwable $e2) {
+                        \Log::warning('Running hour calculation also failed (role-filtered): ' . $e2->getMessage());
+                    }
+                }
+            } else {
+                try {
+                    $runningHourSeconds = $this->computeRunningHourSeconds($now, $shiftInfo['shiftStart'], $shiftInfo['shift']);
+                } catch (\Throwable $e) {
+                    \Log::warning('Running hour calculation failed (role-filtered) for machine without address: ' . $e->getMessage());
+                }
+            }
+
             $statusData = [
                 'name' => $machineName,
                 'line_name' => $lineName,
                 'address' => $table->address,
+                'machine_address' => $table->address, // Untuk kompatibilitas dengan frontend
                 'status' => $finalStatus,
                 'color' => $finalColor,
                 'problem_type' => $problemType,
+                'tipe_problem' => $problemType, // Untuk kompatibilitas dengan frontend
                 'timestamp' => $timestamp,
+                'problem_timestamp' => $timestamp, // Untuk kompatibilitas dengan frontend
                 'last_check' => Carbon::now(config('app.timezone'))->format('Y-m-d H:i:s'),
                 'quantity' => $latestProduction ? $latestProduction->quantity : 0,
                 'id' => $table->id,
@@ -718,6 +856,8 @@ class DashboardController extends Controller
                 'ot_enabled' => (bool) ($table->ot_enabled ?? false),
                 'ot_duration_type' => $table->ot_duration_type,
                 'target_ot' => $table->target_ot !== null ? (int) $table->target_ot : null,
+                'runtime_seconds' => $runtimeSeconds,
+                'running_hour_seconds' => $runningHourSeconds,
             ];
             
             // Only log when status is not normal (to reduce log volume)
@@ -733,6 +873,28 @@ class DashboardController extends Controller
                 $groupedStatuses[$lineName] = [];
             }
             $groupedStatuses[$lineName][] = $statusData;
+        }
+        
+        // OPTIMASI: Batch save semua runtime states yang berubah setelah semua mesin diproses
+        try {
+            if ($runtimeStates && $runtimeStates->isNotEmpty()) {
+                foreach ($runtimeStates as $state) {
+                    if ($state instanceof MachineRuntimeState && ($state->isDirty() || !$state->exists)) {
+                        try {
+                            $state->save();
+                        } catch (\Throwable $saveError) {
+                            \Log::warning('Error saving individual runtime state (role-filtered): ' . $saveError->getMessage(), [
+                                'machine_address' => $state->machine_address ?? 'unknown',
+                                'shift_key' => $state->shift_key ?? 'unknown',
+                            ]);
+                        }
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            \Log::warning('Error batch saving runtime states (getMachineStatusesWithRoleFilter): ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+            ]);
         }
         
         return $groupedStatuses;
@@ -811,6 +973,439 @@ class DashboardController extends Controller
                 'feedback_message' => $problem->feedback_message
             ];
         });
+    }
+
+    /**
+     * Tentukan info shift (pagi/malam) dan waktu mulai shift berdasarkan waktu sekarang.
+     * Shift pagi: 07:00-19:59, shift malam: 20:00-06:59 (next day)
+     */
+    private function getShiftInfo(Carbon $now): array
+    {
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $now = $now->copy()->setTimezone($appTimezone);
+        
+        $h = (int) $now->format('H');
+        $m = (int) $now->format('i');
+        
+        // Shift pagi: 07:00-19:59 (inclusive), shift malam: 20:00-06:59
+        $shift = 'malam';
+        if ($h >= 7 && $h < 20) {
+            $shift = 'pagi';
+        } elseif ($h === 6 && $m <= 59) {
+            $shift = 'malam';
+        } elseif ($h < 7) {
+            $shift = 'malam';
+        } elseif ($h >= 20) {
+            $shift = 'malam';
+        }
+        
+        $shiftStart = $now->copy();
+        if ($shift === 'pagi') {
+            $shiftStart->setTime(7, 0, 0);
+        } else {
+            // malam starts at 20:00 of "shift start date"
+            if ($h < 7) {
+                // after midnight before 07:00 -> shift started yesterday 20:00
+                $shiftStart->subDay()->setTime(20, 0, 0);
+            } else {
+                // 20:00-23:59 -> starts today 20:00
+                $shiftStart->setTime(20, 0, 0);
+            }
+        }
+        
+        $shiftKey = $shiftStart->format('Y-m-d') . '_' . $shift . '_' . $shiftStart->format('Hi');
+        
+        return [
+            'shift' => $shift,
+            'shiftStart' => $shiftStart,
+            'shiftKey' => $shiftKey,
+        ];
+    }
+
+    /**
+     * Hitung Running Hour (detik) - waktu kerja efektif tanpa istirahat.
+     * Menggunakan break schedule untuk mengurangi waktu istirahat.
+     */
+    private function computeRunningHourSeconds(Carbon $now, Carbon $shiftStart, string $shift): int
+    {
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $now = $now->copy()->setTimezone($appTimezone);
+        $shiftStart = $shiftStart->copy()->setTimezone($appTimezone);
+        
+        $elapsed = max(0, $shiftStart->diffInSeconds($now));
+        $maxSeconds = 9 * 3600;
+        
+        try {
+            $dayOfWeek = $shiftStart->isoWeekday(); // 1 (Senin) - 7 (Minggu)
+            $schedule = BreakSchedule::where('day_of_week', $dayOfWeek)
+                ->where('shift', $shift)
+                ->first();
+            
+            if (!$schedule || !$schedule->work_start || !$schedule->work_end) {
+                return min($elapsed, $maxSeconds);
+            }
+            
+            $base = $shiftStart->copy()->startOfDay();
+            $ws = $this->parseTimeStringToHm($schedule->work_start);
+            $we = $this->parseTimeStringToHm($schedule->work_end);
+            if (!$ws || !$we) {
+                return min($elapsed, $maxSeconds);
+            }
+            
+            [$wsH, $wsM] = $ws;
+            [$weH, $weM] = $we;
+            
+            $workStartM = $base->copy()->setTime($wsH, $wsM, 0, 0);
+            $workEndM = $base->copy()->setTime($weH, $weM, 0, 0);
+            
+            if ($weH < $wsH || ($weH === $wsH && $weM < $wsM)) {
+                $workEndM->addDay();
+            }
+            
+            $effectiveStart = $shiftStart->greaterThan($workStartM) ? $shiftStart->copy() : $workStartM;
+            $effectiveEnd = $now->lessThan($workEndM) ? $now->copy() : $workEndM;
+            
+            if ($effectiveEnd->lte($effectiveStart)) {
+                return 0;
+            }
+            
+            $runningSec = max(0, $effectiveStart->diffInSeconds($effectiveEnd));
+            
+            // Kurangi durasi istirahat yang overlap
+            $breaks = $schedule->getBreaksArray();
+            $isMalam = $shift === 'malam';
+            foreach ($breaks as $b) {
+                $bs = $this->parseTimeStringToHm($b['start'] ?? null);
+                $be = $this->parseTimeStringToHm($b['end'] ?? null);
+                if (!$bs || !$be) {
+                    continue;
+                }
+                [$bsH, $bsM] = $bs;
+                [$beH, $beM] = $be;
+                
+                $breakStartM = $base->copy()->setTime($bsH, $bsM, 0, 0);
+                $breakEndM = $base->copy()->setTime($beH, $beM, 0, 0);
+                
+                if ($isMalam && $bsH < 12) {
+                    $breakStartM->addDay();
+                    $breakEndM->addDay();
+                } elseif ($beH < $bsH || ($beH === $bsH && $beM < $bsM)) {
+                    $breakEndM->addDay();
+                }
+                
+                $overStart = $effectiveStart->greaterThan($breakStartM) ? $effectiveStart : $breakStartM;
+                $overEnd = $effectiveEnd->lessThan($breakEndM) ? $effectiveEnd : $breakEndM;
+                
+                if ($overEnd->gt($overStart)) {
+                    $overSec = max(0, $overStart->diffInSeconds($overEnd));
+                    $runningSec -= $overSec;
+                }
+            }
+            
+            return max(0, min($runningSec, $maxSeconds));
+        } catch (\Exception $e) {
+            \Log::warning('Error computing running hour: ' . $e->getMessage());
+            return min($elapsed, $maxSeconds);
+        }
+    }
+
+    /**
+     * Parse string waktu seperti "HH:MM" atau "HH:MM:SS" menjadi [h, m].
+     */
+    private function parseTimeStringToHm(?string $time): ?array
+    {
+        if (!$time) {
+            return null;
+        }
+        $time = trim($time);
+        $parts = explode(':', $time);
+        if (count($parts) < 2) {
+            return null;
+        }
+        $h = (int) $parts[0];
+        $m = (int) $parts[1];
+        if ($h < 0 || $h > 23 || $m < 0 || $m > 59) {
+            return null;
+        }
+        return [$h, $m];
+    }
+
+    /**
+     * Helper untuk parse datetime yang aman - bisa menerima Carbon instance, string, atau null.
+     */
+    private function safeParseDateTime($value, string $timezone = 'Asia/Jakarta'): ?Carbon
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+        if ($value instanceof Carbon) {
+            return $value->copy()->setTimezone($timezone);
+        }
+        try {
+            return Carbon::parse($value)->setTimezone($timezone);
+        } catch (\Exception $e) {
+            \Log::warning('Failed to parse datetime: ' . $e->getMessage(), ['value' => $value]);
+            return null;
+        }
+    }
+
+    /**
+     * Hitung Runtime (detik) untuk mesin tertentu dengan state management di database (optimized version).
+     * Menggunakan state yang sudah di-load untuk menghindari N+1 query problem.
+     * @param mixed $problemTimestamp datetime string dari DB atau Carbon instance
+     */
+    private function computeRuntimeSecondsOptimized(
+        string $machineAddress,
+        Carbon $now,
+        Carbon $shiftStart,
+        string $shift,
+        string $shiftKey,
+        string $status,
+        ?string $problemType,
+        $problemTimestamp,
+        ?MachineRuntimeState $state
+    ): array
+    {
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $now = $now->copy()->setTimezone($appTimezone);
+        $shiftStart = $shiftStart->copy()->setTimezone($appTimezone);
+        
+        // Load atau create state dari parameter (jika null, buat baru tapi jangan save dulu)
+        if (!$state) {
+            $state = new MachineRuntimeState([
+                'machine_address' => $machineAddress,
+                'shift_key' => $shiftKey,
+            ]);
+        }
+        
+        // Reset state jika shift berubah
+        if ($state->exists && $state->shift_key !== $shiftKey) {
+            $state->downtime_start_at = null;
+            $state->runtime_pause_start_at = null;
+            $state->runtime_pause_accumulated_seconds = 0;
+            $state->paused_runtime_value = null;
+        }
+        
+        // Tentukan apakah mesin sedang downtime (hanya untuk machine/quality/engineering)
+        $isDowntimeActive = false;
+        if ($status === 'problem') {
+            $problemTypeNorm = strtolower(trim($problemType ?? ''));
+            $isDowntimeActive = in_array($problemTypeNorm, ['machine', 'quality', 'engineering']) ||
+                strpos($problemTypeNorm, 'machine') !== false ||
+                strpos($problemTypeNorm, 'quality') !== false ||
+                strpos($problemTypeNorm, 'engineering') !== false;
+        }
+        
+        // Hitung downtime (hanya untuk problem downtime)
+        $downtimeSec = 0;
+        if ($isDowntimeActive && $problemTimestamp !== null && $problemTimestamp !== '') {
+            $problemTs = $this->safeParseDateTime($problemTimestamp, $appTimezone);
+            if ($problemTs) {
+                $downtimeStart = $problemTs->greaterThan($shiftStart) ? $problemTs : $shiftStart;
+                
+                if (!$state->downtime_start_at) {
+                    $state->downtime_start_at = $downtimeStart;
+                }
+                
+                $downtimeStartCarbon = $this->safeParseDateTime($state->downtime_start_at, $appTimezone);
+                if ($downtimeStartCarbon) {
+                    $downtimeSec = max(0, $downtimeStartCarbon->diffInSeconds($now));
+                }
+            }
+        } else {
+            if ($state->downtime_start_at) {
+                $state->downtime_start_at = null;
+            }
+        }
+        
+        // Tentukan apakah runtime harus pause (LOGIKA DISAMAKAN DENGAN PERMINTAAN USER):
+        // - Saat status NORMAL  : runtime BERJALAN.
+        // - Saat status IDLE    : runtime BERHENTI TOTAL.
+        // - Saat status PROBLEM : runtime BERHENTI TOTAL (apapun tipe problem‑nya).
+        //
+        // Di backend status idle diwakili oleh 'warning' (quantity tidak naik),
+        // namun jika nanti ada status 'idle' eksplisit kita juga ikut mendukungnya.
+        $normalizedStatus = strtolower(trim($status));
+        $isRuntimePaused = in_array($normalizedStatus, ['idle', 'warning', 'problem'], true);
+        
+        // Update runtime pause state
+        if ($isRuntimePaused) {
+            if (!$state->runtime_pause_start_at) {
+                $state->runtime_pause_start_at = $now;
+            }
+        } else {
+            // RESUME (status normal): pastikan state pause dibersihkan agar runtime jalan lagi
+            if ($state->runtime_pause_start_at) {
+                $pauseStart = $this->safeParseDateTime($state->runtime_pause_start_at, $appTimezone);
+                if ($pauseStart) {
+                    $pauseDuration = max(0, $pauseStart->diffInSeconds($now));
+                    $state->runtime_pause_accumulated_seconds = (int) (($state->runtime_pause_accumulated_seconds ?? 0) + $pauseDuration);
+                }
+                $state->runtime_pause_start_at = null;
+            }
+            // Wajib clear paused_runtime_value saat normal agar hitungan pakai runtimeRaw (yang naik setiap detik)
+            $state->paused_runtime_value = null;
+        }
+        
+        // Hitung runtime pause current (jika sedang pause)
+        $runtimePauseSecCurrent = 0;
+        if ($state->runtime_pause_start_at) {
+            $pauseStart = $this->safeParseDateTime($state->runtime_pause_start_at, $appTimezone);
+            if ($pauseStart) {
+                $runtimePauseSecCurrent = max(0, $pauseStart->diffInSeconds($now));
+            }
+        }
+        
+        $runtimePauseTotalSec = (int) (($state->runtime_pause_accumulated_seconds ?? 0) + $runtimePauseSecCurrent);
+        
+        // Hitung runtime raw (elapsed - downtime - pause)
+        $elapsedSinceShiftStart = max(0, $shiftStart->diffInSeconds($now));
+        $runtimeWithoutPause = max(0, $elapsedSinceShiftStart - $downtimeSec);
+        $runtimeRaw = max(0, $runtimeWithoutPause - $runtimePauseTotalSec);
+        
+        if ($isRuntimePaused) {
+            // Run time HARUS berhenti: selalu kembalikan nilai yang dibekukan, jangan runtimeRaw.
+            if ($state->paused_runtime_value === null || $state->paused_runtime_value === '') {
+                // Saat pertama kali masuk idle/problem: bekukan nilai runtime saat ini
+                $state->paused_runtime_value = (int) $runtimeRaw;
+                $runtimeSeconds = (int) $runtimeRaw;
+            } else {
+                $runtimeSeconds = (int) $state->paused_runtime_value;
+            }
+        } else {
+            // Status normal: runtime jalan lagi
+            $runtimeSeconds = (int) $runtimeRaw;
+        }
+        
+        return [
+            'runtime_seconds' => $runtimeSeconds,
+            'running_hour_seconds' => $this->computeRunningHourSeconds($now, $shiftStart, $shift),
+            'state' => $state, // Return state untuk di-save secara batch
+        ];
+    }
+
+    /**
+     * Hitung Runtime (detik) untuk mesin tertentu dengan state management di database.
+     * Runtime pause ketika idle/warning/problem, dan resume saat normal.
+     * DEPRECATED: Gunakan computeRuntimeSecondsOptimized untuk performa lebih baik.
+     */
+    private function computeRuntimeSeconds(
+        string $machineAddress,
+        Carbon $now,
+        Carbon $shiftStart,
+        string $shift,
+        string $shiftKey,
+        string $status,
+        ?string $problemType,
+        ?Carbon $problemTimestamp
+    ): array
+    {
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $now = $now->copy()->setTimezone($appTimezone);
+        $shiftStart = $shiftStart->copy()->setTimezone($appTimezone);
+        
+        // Load atau create state dari database
+        $state = MachineRuntimeState::firstOrNew([
+            'machine_address' => $machineAddress,
+            'shift_key' => $shiftKey,
+        ]);
+        
+        // Reset state jika shift berubah
+        if ($state->exists && $state->shift_key !== $shiftKey) {
+            $state->downtime_start_at = null;
+            $state->runtime_pause_start_at = null;
+            $state->runtime_pause_accumulated_seconds = 0;
+            $state->paused_runtime_value = null;
+        }
+        
+        // Tentukan apakah mesin sedang downtime (hanya untuk machine/quality/engineering)
+        $isDowntimeActive = false;
+        if ($status === 'problem') {
+            $problemTypeNorm = strtolower(trim($problemType ?? ''));
+            $isDowntimeActive = in_array($problemTypeNorm, ['machine', 'quality', 'engineering']) ||
+                strpos($problemTypeNorm, 'machine') !== false ||
+                strpos($problemTypeNorm, 'quality') !== false ||
+                strpos($problemTypeNorm, 'engineering') !== false;
+        }
+        
+        // Hitung downtime (hanya untuk problem downtime)
+        $downtimeSec = 0;
+        if ($isDowntimeActive && $problemTimestamp) {
+            $problemTs = Carbon::parse($problemTimestamp)->setTimezone($appTimezone);
+            $downtimeStart = $problemTs->greaterThan($shiftStart) ? $problemTs : $shiftStart;
+            
+            if (!$state->downtime_start_at) {
+                $state->downtime_start_at = $downtimeStart;
+                $state->save();
+            }
+            
+            $downtimeStartCarbon = Carbon::parse($state->downtime_start_at)->setTimezone($appTimezone);
+            $downtimeSec = max(0, $downtimeStartCarbon->diffInSeconds($now));
+        } else {
+            if ($state->downtime_start_at) {
+                $state->downtime_start_at = null;
+            }
+        }
+        
+        // Tentukan apakah runtime harus pause (idle/warning/problem)
+        $isRuntimePaused = in_array($status, ['idle', 'warning', 'problem']);
+        
+        // Update runtime pause state
+        if ($isRuntimePaused) {
+            if (!$state->runtime_pause_start_at) {
+                $state->runtime_pause_start_at = $now;
+                $state->save();
+            }
+        } else {
+            // Resume: akumulasi durasi pause yang baru saja selesai
+            if ($state->runtime_pause_start_at) {
+                $pauseStart = Carbon::parse($state->runtime_pause_start_at)->setTimezone($appTimezone);
+                $pauseDuration = max(0, $pauseStart->diffInSeconds($now));
+                $state->runtime_pause_accumulated_seconds += $pauseDuration;
+                $state->runtime_pause_start_at = null;
+                $state->save();
+            }
+        }
+        
+        // Hitung runtime pause current (jika sedang pause)
+        $runtimePauseSecCurrent = 0;
+        if ($state->runtime_pause_start_at) {
+            $pauseStart = Carbon::parse($state->runtime_pause_start_at)->setTimezone($appTimezone);
+            $runtimePauseSecCurrent = max(0, $pauseStart->diffInSeconds($now));
+        }
+        
+        $runtimePauseTotalSec = $state->runtime_pause_accumulated_seconds + $runtimePauseSecCurrent;
+        
+        // Hitung runtime raw (elapsed - downtime - pause)
+        $elapsedSinceShiftStart = max(0, $shiftStart->diffInSeconds($now));
+        $runtimeWithoutPause = max(0, $elapsedSinceShiftStart - $downtimeSec);
+        $runtimeRaw = max(0, $runtimeWithoutPause - $runtimePauseTotalSec);
+        
+        // BUGFIX: Jika kita sedang dalam keadaan paused dan pernah menyimpan paused_runtime_value
+        // (misalnya setelah reload / login ulang), rekalkulasi total durasi pause
+        // agar runtimeRaw SELALU kembali ke paused_runtime_value saat resume,
+        // tidak meloncat mengikuti lama istirahat.
+        if ($isRuntimePaused && $state->paused_runtime_value !== null) {
+            // Sudah ada paused value, gunakan itu
+            $runtimeSeconds = $state->paused_runtime_value;
+        } elseif ($isRuntimePaused) {
+            // Baru masuk pause, simpan nilai saat ini
+            $state->paused_runtime_value = $runtimeRaw;
+            $state->save();
+            $runtimeSeconds = $runtimeRaw;
+        } else {
+            // Tidak pause, clear paused value jika ada
+            if ($state->paused_runtime_value !== null) {
+                $state->paused_runtime_value = null;
+                $state->save();
+            }
+            $runtimeSeconds = $runtimeRaw;
+        }
+        
+        return [
+            'runtime_seconds' => $runtimeSeconds,
+            'running_hour_seconds' => $this->computeRunningHourSeconds($now, $shiftStart, $shift),
+        ];
     }
 
     /**
