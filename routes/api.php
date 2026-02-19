@@ -60,6 +60,9 @@ Route::prefix('ticketing')->group(function () {
     Route::get('/technicians/list', [TicketingProblemController::class, 'getTechnicians']);
 });
 
+// Server time for global Run Time / Running Hour sync (no auth required for sync)
+Route::get('server-time', [DashboardController::class, 'serverTime']);
+
 // Dashboard status route - accessible without Sanctum (uses custom auth)
 Route::get('dashboard/status', [DashboardController::class, 'getStatusApi']);
 
