@@ -1220,10 +1220,39 @@ class DashboardController extends Controller
         $normalizedStatus = strtolower(trim((string) $status));
         $isRuntimePaused = in_array($normalizedStatus, ['idle', 'warning', 'problem'], true);
         
+        // Cek apakah sebelumnya sudah dalam status pause
+        $wasPausedBefore = (bool) $state->runtime_pause_start_at;
+        
+        // Hitung runtime pause current SEBELUM update state (untuk akurasi)
+        $runtimePauseSecCurrentBefore = 0;
+        if ($state->runtime_pause_start_at) {
+            $pauseStartBefore = $this->safeParseDateTime($state->runtime_pause_start_at, $appTimezone);
+            if ($pauseStartBefore) {
+                $runtimePauseSecCurrentBefore = max(0, $pauseStartBefore->diffInSeconds($now));
+            }
+        }
+        
+        $runtimePauseTotalSecBefore = (int) (($state->runtime_pause_accumulated_seconds ?? 0) + $runtimePauseSecCurrentBefore);
+        
+        // Hitung runtime raw SEBELUM update state (nilai runtime saat ini)
+        $elapsedSinceShiftStart = max(0, $shiftStart->diffInSeconds($now));
+        $runtimeWithoutPause = max(0, $elapsedSinceShiftStart - $downtimeSec);
+        $runtimeRawBeforeUpdate = max(0, $runtimeWithoutPause - $runtimePauseTotalSecBefore);
+        
         // Update runtime pause state
         if ($isRuntimePaused) {
+            // PAUSE: Set pause start time jika belum ada
             if (!$state->runtime_pause_start_at) {
                 $state->runtime_pause_start_at = $now->copy();
+                // Saat pertama kali pause, simpan nilai runtime saat ini sebagai frozen value
+                $state->paused_runtime_value = (int) $runtimeRawBeforeUpdate;
+                // Pastikan state di-mark sebagai dirty agar tersimpan
+                $state->syncChanges();
+            }
+            // Pastikan paused_runtime_value selalu ada saat pause
+            if ($state->paused_runtime_value === null) {
+                $state->paused_runtime_value = (int) $runtimeRawBeforeUpdate;
+                $state->syncChanges();
             }
         } else {
             // RESUME (status normal): pastikan state pause dibersihkan agar runtime jalan lagi
@@ -1234,12 +1263,16 @@ class DashboardController extends Controller
                     $state->runtime_pause_accumulated_seconds = (int) (($state->runtime_pause_accumulated_seconds ?? 0) + $pauseDuration);
                 }
                 $state->runtime_pause_start_at = null;
+                $state->syncChanges();
             }
-            // Wajib clear paused_runtime_value saat normal agar hitungan pakai runtimeRaw (yang naik setiap detik)
-            $state->paused_runtime_value = null;
+            // Wajib clear paused_runtime_value saat normal agar runtime bisa jalan lagi dari nilai saat ini
+            if ($state->paused_runtime_value !== null) {
+                $state->paused_runtime_value = null;
+                $state->syncChanges();
+            }
         }
         
-        // Hitung runtime pause current (jika sedang pause)
+        // Hitung runtime pause current SETELAH update state (untuk perhitungan selanjutnya)
         $runtimePauseSecCurrent = 0;
         if ($state->runtime_pause_start_at) {
             $pauseStart = $this->safeParseDateTime($state->runtime_pause_start_at, $appTimezone);
@@ -1250,21 +1283,47 @@ class DashboardController extends Controller
         
         $runtimePauseTotalSec = (int) (($state->runtime_pause_accumulated_seconds ?? 0) + $runtimePauseSecCurrent);
         
-        // Hitung runtime raw (elapsed - downtime - pause)
-        $elapsedSinceShiftStart = max(0, $shiftStart->diffInSeconds($now));
-        $runtimeWithoutPause = max(0, $elapsedSinceShiftStart - $downtimeSec);
+        // Hitung runtime raw SETELAH update state
         $runtimeRaw = max(0, $runtimeWithoutPause - $runtimePauseTotalSec);
         
+        // Tentukan runtime seconds berdasarkan status pause
         if ($isRuntimePaused) {
+            // PAUSE: Gunakan frozen value yang sudah disimpan (tidak berubah selama pause)
+            // Pastikan selalu menggunakan paused_runtime_value yang sudah diset sebelumnya
             if ($state->paused_runtime_value !== null && $state->paused_runtime_value !== '') {
                 $runtimeSeconds = (int) $state->paused_runtime_value;
             } else {
-                $state->paused_runtime_value = $runtimeRaw;
-                $runtimeSeconds = $runtimeRaw;
+                // Fallback: gunakan runtimeRawBeforeUpdate (nilai sebelum pause dimulai)
+                $runtimeSeconds = (int) $runtimeRawBeforeUpdate;
+                $state->paused_runtime_value = (int) $runtimeRawBeforeUpdate;
+                $state->syncChanges();
+            }
+            
+            // Log untuk debugging (hanya saat pertama kali pause)
+            if (!$wasPausedBefore) {
+                \Log::info("Runtime PAUSED for machine {$machineAddress}", [
+                    'status' => $status,
+                    'normalized_status' => $normalizedStatus,
+                    'paused_runtime_value' => $state->paused_runtime_value,
+                    'runtimeRawBeforeUpdate' => $runtimeRawBeforeUpdate,
+                    'runtimeRaw' => $runtimeRaw,
+                    'shift_key' => $shiftKey,
+                ]);
             }
         } else {
-            // Status normal: selalu pakai runtimeRaw agar waktu jalan lagi
+            // RESUME (normal): selalu pakai runtimeRaw agar waktu jalan lagi
             $runtimeSeconds = $runtimeRaw;
+            
+            // Log untuk debugging (hanya saat resume dari pause)
+            if ($wasPausedBefore) {
+                \Log::info("Runtime RESUMED for machine {$machineAddress}", [
+                    'status' => $status,
+                    'normalized_status' => $normalizedStatus,
+                    'runtimeRaw' => $runtimeRaw,
+                    'accumulated_pause' => $state->runtime_pause_accumulated_seconds,
+                    'shift_key' => $shiftKey,
+                ]);
+            }
         }
         
         return [
@@ -1454,6 +1513,30 @@ class DashboardController extends Controller
                 'timestamp' => Carbon::now(config('app.timezone'))->format('Y-m-d H:i:s')
             ]
         ]);
+    }
+
+    /**
+     * Get server time untuk sinkronisasi waktu di semua device
+     */
+    public function serverTime()
+    {
+        try {
+            $serverTime = Carbon::now(config('app.timezone'));
+            return response()->json([
+                'success' => true,
+                'server_time' => $serverTime->toIso8601String(),
+                'timestamp' => $serverTime->format('Y-m-d H:i:s'),
+            ]);
+        } catch (\Throwable $e) {
+            \Log::error('Error in serverTime endpoint: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+            ]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to get server time',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
     }
 
     /**
