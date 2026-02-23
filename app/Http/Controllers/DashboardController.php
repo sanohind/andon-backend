@@ -609,6 +609,7 @@ class DashboardController extends Controller
                 'problem_timestamp' => $timestamp, // Untuk kompatibilitas dengan frontend
                 'last_check' => Carbon::now(config('app.timezone'))->format('Y-m-d H:i:s'),
                 'quantity' => $latestProduction ? $latestProduction->quantity : 0,
+                'cavity' => (int) ($table->cavity ?? 1),
                 'id' => $table->id,
                 'cycle_based_status' => $cycleBasedStatus, // Include cycle-based status for reference
                 'ot_enabled' => (bool) ($table->ot_enabled ?? false),
@@ -847,6 +848,7 @@ class DashboardController extends Controller
                 'problem_timestamp' => $timestamp, // Untuk kompatibilitas dengan frontend
                 'last_check' => Carbon::now(config('app.timezone'))->format('Y-m-d H:i:s'),
                 'quantity' => $latestProduction ? $latestProduction->quantity : 0,
+                'cavity' => (int) ($table->cavity ?? 1),
                 'id' => $table->id,
                 'cycle_based_status' => $cycleBasedStatus, // Include cycle-based status for reference
                 'ot_enabled' => (bool) ($table->ot_enabled ?? false),

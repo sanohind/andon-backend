@@ -349,6 +349,37 @@ class InspectionTableController extends Controller
         ]);
     }
 
+    /**
+     * Set Cavity untuk mesin (default 1). Mempengaruhi tampilan Total Product = quantity × cavity.
+     */
+    public function setCavity(Request $request, $address)
+    {
+        if ($blockResponse = $this->blockManagementWrite($request)) {
+            return $blockResponse;
+        }
+
+        $validated = $request->validate([
+            'cavity' => 'required|integer|min:1',
+        ]);
+
+        $table = InspectionTable::where('address', $address)->first();
+        if (!$table) {
+            return response()->json(['message' => 'Inspection table with address not found.'], 404);
+        }
+
+        $table->update(['cavity' => $validated['cavity']]);
+        $table->refresh();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Cavity updated',
+            'data' => [
+                'address' => $address,
+                'cavity' => $table->cavity,
+            ],
+        ]);
+    }
+
     private function normalizeTablePayload(array $payload): array
     {
         foreach ($payload as $key => $value) {
@@ -384,6 +415,7 @@ class InspectionTableController extends Controller
                 'ot_enabled' => (bool) ($t->ot_enabled ?? false),
                 'ot_duration_type' => $t->ot_duration_type,
                 'target_ot' => $t->target_ot !== null ? (int) $t->target_ot : null,
+                'cavity' => (int) ($t->cavity ?? 1),
             ];
         })->values();
 

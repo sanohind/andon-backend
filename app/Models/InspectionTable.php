@@ -8,7 +8,7 @@ class InspectionTable extends Model
 {
     use HasFactory;
     protected $table = 'inspection_tables';
-	protected $fillable = ['name', 'line_name', 'division', 'address', 'oee', 'target_quantity', 'cycle_time', 'warning_cycle_count', 'problem_cycle_count', 'ot_enabled', 'ot_duration_type', 'target_ot'];
+	protected $fillable = ['name', 'line_name', 'division', 'address', 'oee', 'target_quantity', 'cycle_time', 'warning_cycle_count', 'problem_cycle_count', 'ot_enabled', 'ot_duration_type', 'target_ot', 'cavity'];
 
     protected $casts = [
         'target_quantity' => 'integer',
@@ -18,6 +18,7 @@ class InspectionTable extends Model
         'problem_cycle_count' => 'integer',
         'ot_enabled' => 'boolean',
         'target_ot' => 'integer',
+        'cavity' => 'integer',
     ];
 
     /**
