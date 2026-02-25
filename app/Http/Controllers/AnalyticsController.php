@@ -26,6 +26,11 @@ class AnalyticsController extends Controller
     protected array $cycleTimeCache = [];
 
     /**
+     * Cache sederhana untuk nilai cavity per mesin (address)
+     */
+    protected array $cavityCache = [];
+
+    /**
      * Menyediakan data analitik berdasarkan rentang waktu.
      */
     public function getAnalyticsData(Request $request)
@@ -209,6 +214,10 @@ class AnalyticsController extends Controller
             $machinesData = [];
             foreach ($machines as $machine) {
                 $targetPerDay = (int) ($machine->target_quantity ?? 0);
+                $cavity = (int) ($machine->cavity ?? 1);
+                if ($cavity < 1) {
+                    $cavity = 1;
+                }
                 $totalActual = 0;
                 $totalActualRegular = 0;
 
@@ -229,13 +238,19 @@ class AnalyticsController extends Controller
                 $actualRegular = $machine->ot_enabled ? $totalActualRegular : $totalActual;
                 $targetOt = $machine->ot_enabled && $machine->target_ot !== null ? (int) $machine->target_ot * $productionDays : null;
 
+                // Hanya quantity aktual yang dikalikan cavity
+                $actualQuantityWithCavity = $totalActual * $cavity;
+                $actualRegularWithCavity = $actualRegular * $cavity;
+                $actualOtWithCavity = $actualOt * $cavity;
+
                 $machinesData[] = [
                     'name' => $machine->name,
                     'address' => $machine->address,
+                    // Target disimpan apa adanya (sudah disesuaikan manual dengan cavity)
                     'target_quantity' => $totalTarget,
-                    'actual_quantity' => $totalActual,
-                    'actual_quantity_regular' => $actualRegular,
-                    'actual_quantity_ot' => $actualOt,
+                    'actual_quantity' => $actualQuantityWithCavity,
+                    'actual_quantity_regular' => $actualRegularWithCavity,
+                    'actual_quantity_ot' => $actualOtWithCavity,
                     'target_ot' => $targetOt,
                     'ot_enabled' => (bool) $machine->ot_enabled,
                 ];
@@ -283,6 +298,7 @@ class AnalyticsController extends Controller
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
         $address = trim($request->machine_address);
         $otEnabled = $this->getOtEnabledForMachine($address);
+        $cavity = $this->getCavityForMachine($address);
 
         [$startUtc, $endUtc] = $this->resolveShiftWindow(
             $request->date,
@@ -303,7 +319,7 @@ class AnalyticsController extends Controller
         // Ambil cycle time sekali saja untuk mesin ini
         $cycleTime = $this->getCycleTimeForMachine($address);
 
-        $data = $rows->map(function ($row) use ($startApp, $request, $appTimezone, $cycleTime) {
+        $data = $rows->map(function ($row) use ($startApp, $request, $appTimezone, $cycleTime, $cavity) {
             $snapshotAtApp = $row->snapshot_at->copy()->setTimezone($appTimezone);
             $runningSeconds = $this->computeRunningHourSecondsForSnapshot(
                 $snapshotAtApp,
@@ -314,12 +330,13 @@ class AnalyticsController extends Controller
 
             $idealQty = 0;
             if ($cycleTime > 0 && $runningSeconds > 0) {
-                $idealQty = (int) floor($runningSeconds / $cycleTime);
+                $idealBase = (int) floor($runningSeconds / $cycleTime);
+                $idealQty = $idealBase * $cavity;
             }
 
             return [
                 'snapshot_at' => $snapshotAtApp->format('Y-m-d H:i'),
-                'quantity' => (int) $row->quantity,
+                'quantity' => (int) $row->quantity * $cavity,
                 'ideal_quantity' => $idealQty,
             ];
         })->values();
@@ -357,6 +374,31 @@ class AnalyticsController extends Controller
         $cycle = $table && $table->cycle_time ? (int) $table->cycle_time : 0;
         $this->cycleTimeCache[$key] = $cycle;
         return $cycle;
+    }
+
+    /**
+     * Ambil nilai cavity untuk mesin berdasarkan address, dengan cache sederhana.
+     * Default ke 1 jika tidak ada data atau nilai tidak valid.
+     */
+    private function getCavityForMachine(string $address): int
+    {
+        $key = trim($address);
+        if ($key === '') {
+            return 1;
+        }
+        if (array_key_exists($key, $this->cavityCache)) {
+            return $this->cavityCache[$key];
+        }
+
+        $table = InspectionTable::where('address', $key)->first();
+        $cavity = 1;
+        if ($table && $table->cavity !== null) {
+            $cavityValue = (int) $table->cavity;
+            $cavity = $cavityValue > 0 ? $cavityValue : 1;
+        }
+
+        $this->cavityCache[$key] = $cavity;
+        return $cavity;
     }
 
     /**
