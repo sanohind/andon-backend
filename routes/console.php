@@ -10,7 +10,14 @@ Artisan::command('inspire', function () {
 
 // Snapshot quantity dari production_data ke production_data_hourly setiap jam pada menit 58
 Schedule::command('production:hourly-snapshot')
-    ->hourlyAt(58)
+    ->hourlyAt(59)
+    ->timezone(config('app.timezone', 'Asia/Jakarta'))
+    ->withoutOverlapping()
+    ->runInBackground();
+
+// Reset / nonaktifkan OT setiap hari jam 07:00
+Schedule::command('production:reset-ot-daily')
+    ->dailyAt('07:00')
     ->timezone(config('app.timezone', 'Asia/Jakarta'))
     ->withoutOverlapping()
     ->runInBackground();
