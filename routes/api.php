@@ -11,6 +11,7 @@ use App\Http\Controllers\PartConfigurationController;
 use App\Http\Controllers\DivisionLineController;
 use App\Http\Controllers\TeknisiPicController;
 use App\Http\Controllers\BreakScheduleController;
+use App\Http\Controllers\OeeSettingController;
 
 // Auth Routes - TANPA PREFIX AUTH
 Route::post('/login', [AuthController::class, 'login']);
@@ -120,6 +121,10 @@ Route::get('/machine-status/{name}', [InspectionTableController::class, 'getMach
 // Break schedules (jam kerja & istirahat) - GET untuk semua, PUT hanya admin
 Route::get('/break-schedules', [BreakScheduleController::class, 'index']);
 Route::put('/break-schedules', [BreakScheduleController::class, 'update']);
+
+// OEE settings (warning threshold) - GET semua role, PUT hanya admin
+Route::get('/oee-settings', [OeeSettingController::class, 'show']);
+Route::put('/oee-settings', [OeeSettingController::class, 'update']);
 
 // Part configurations routes - accessible without Sanctum (uses custom auth)
 Route::get('/part-configurations', [PartConfigurationController::class, 'index']);
