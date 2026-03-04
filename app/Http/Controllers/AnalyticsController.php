@@ -609,36 +609,37 @@ class AnalyticsController extends Controller
         $normalizedAddress = trim($address);
         $lowerAddress = strtolower($normalizedAddress);
 
-        // Sesuaikan window waktu dengan timezone aplikasi (data produksi disimpan tanpa info timezone)
+        // Sesuaikan window waktu dengan timezone aplikasi
         $startLocal = $startUtc->copy()->setTimezone($appTimezone);
         $endLocal = $endUtc->copy()->setTimezone($appTimezone);
         $startStr = $startLocal->format('Y-m-d H:i:s');
         $endStr = $endLocal->format('Y-m-d H:i:s');
 
-        $windowBase = function () use ($startStr, $endStr) {
-            return ProductionData::whereBetween('timestamp', [$startStr, $endStr])
-                ->orderBy('timestamp', 'desc');
+        // === Gunakan snapshot hourly (production_data_hourly) agar history tidak hilang ketika production_data dibersihkan ===
+        $hourlyBase = function () use ($startStr, $endStr) {
+            return ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
+                ->orderBy('snapshot_at', 'desc');
         };
 
-        // Strategy 1: Exact match - ambil record terbaru
-        $latest = $windowBase()->where('machine_name', $normalizedAddress)->first();
+        // Strategy 1: Exact match dari snapshot hourly
+        $latest = $hourlyBase()->where('machine_name', $normalizedAddress)->first();
         if ($latest) {
             return max(0, (int) $latest->quantity);
         }
 
-        // Strategy 2: Case-insensitive + trim
-        $latest = ProductionData::whereBetween('timestamp', [$startStr, $endStr])
+        // Strategy 2: Case-insensitive + trim pada snapshot hourly
+        $latest = ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
             ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress])
-            ->orderBy('timestamp', 'desc')
+            ->orderBy('snapshot_at', 'desc')
             ->first();
         if ($latest) {
             return max(0, (int) $latest->quantity);
         }
 
-        // Strategy 3: Partial match (last resort)
-        $latest = ProductionData::whereBetween('timestamp', [$startStr, $endStr])
+        // Strategy 3: Partial match (last resort) pada snapshot hourly
+        $latest = ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
             ->whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%'])
-            ->orderBy('timestamp', 'desc')
+            ->orderBy('snapshot_at', 'desc')
             ->first();
         if ($latest) {
             return max(0, (int) $latest->quantity);

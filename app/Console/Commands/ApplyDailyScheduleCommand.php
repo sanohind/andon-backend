@@ -27,6 +27,14 @@ class ApplyDailyScheduleCommand extends Command
 
         $date = Carbon::parse($dateStr, 'Asia/Jakarta')->startOfDay();
 
+        // Reset target & OT untuk semua mesin terlebih dahulu (agar mesin tanpa schedule juga ter-reset)
+        InspectionTable::query()->update([
+            'target_quantity' => 0,
+            'ot_enabled' => false,
+            'ot_duration_type' => null,
+            'target_ot' => null,
+        ]);
+
         $schedules = MachineSchedule::whereDate('schedule_date', $date)
             ->where('shift', $shift)
             ->get();
