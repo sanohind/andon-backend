@@ -23,7 +23,7 @@ Schedule::command('schedule:apply-daily', ['--shift' => 'pagi'])
     ->runInBackground();
 
 Schedule::command('schedule:apply-daily', ['--shift' => 'malam'])
-    ->dailyAt('20:00')
+    ->dailyAt('21:00')
     ->timezone(config('app.timezone', 'Asia/Jakarta'))
     ->withoutOverlapping()
     ->runInBackground();

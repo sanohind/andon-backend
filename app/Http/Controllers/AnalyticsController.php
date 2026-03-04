@@ -146,7 +146,7 @@ class AnalyticsController extends Controller
     /**
      * Get target vs actual quantity per mesin/meja untuk chart perbandingan.
      * Mendukung: tanggal spesifik, bulanan (akumulasi), tahuanan (akumulasi).
-     * Shift pagi: 07:00 - 19:59 | Shift malam: 20:00 - 06:59 (hari berikutnya)
+     * Shift pagi: 07:00 - 19:59 | Shift malam: 21:00 - 06:59 (hari berikutnya)
      */
     public function getLineQuantityComparison(Request $request)
     {
@@ -435,7 +435,7 @@ class AnalyticsController extends Controller
      * Menentukan window UTC untuk shift terpilih.
      * Batas akhir 1 detik sebelum reset (06:59 / 19:59) agar data yang diambil bukan nilai setelah reset (0).
      * Shift pagi: tanggal 07:00 - tanggal 19:58:59
-     * Shift malam: tanggal 20:00 - tanggal+1 06:58:59
+     * Shift malam: tanggal 21:00 - tanggal+1 06:58:59
      *
      * @return array{0: Carbon, 1: Carbon}
      */
@@ -448,8 +448,8 @@ class AnalyticsController extends Controller
             $startApp = $date->copy()->setTime(7, 0, 0);
             $endApp = $date->copy()->setTime(19, 58, 59);
         } else {
-            // Shift Malam: 20:00 hari ini - 06:58:59 hari berikutnya (reset jam 06:59)
-            $startApp = $date->copy()->setTime(20, 0, 0);
+            // Shift Malam: 21:00 hari ini - 06:58:59 hari berikutnya (reset jam 06:59)
+            $startApp = $date->copy()->setTime(21, 0, 0);
             $endApp = $date->copy()->addDay()->setTime(6, 58, 59);
         }
 
@@ -616,15 +616,15 @@ class AnalyticsController extends Controller
         $endStr = $endLocal->format('Y-m-d H:i:s');
 
         // === Gunakan snapshot hourly (production_data_hourly) agar history tidak hilang ketika production_data dibersihkan ===
-        $hourlyBase = function () use ($startStr, $endStr) {
-            return ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
-                ->orderBy('snapshot_at', 'desc');
-        };
-
-        // Strategy 1: Exact match dari snapshot hourly
-        $latest = $hourlyBase()->where('machine_name', $normalizedAddress)->first();
-        if ($latest) {
-            return max(0, (int) $latest->quantity);
+        // Strategy 1: Exact match dari snapshot hourly dan gunakan selisih (last - first) dalam window
+        $series = ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
+            ->where('machine_name', $normalizedAddress)
+            ->orderBy('snapshot_at', 'asc')
+            ->get(['quantity']);
+        if ($series->isNotEmpty()) {
+            $first = (int) $series->first()->quantity;
+            $last = (int) $series->last()->quantity;
+            return max(0, $last - $first);
         }
 
         // Strategy 2: Case-insensitive + trim pada snapshot hourly
