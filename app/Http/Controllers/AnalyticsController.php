@@ -595,10 +595,9 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Ambil quantity aktual dari record TERBARU dalam window shift.
-     * Bukan akumulasi/SUM - hanya data paling baru yang masih masuk range waktu shift.
-     * Shift pagi: 07:00-19:59 (reset jam 20:00 untuk shift malam).
-     * Shift malam: 20:00-06:59 (reset jam 07:00 untuk shift pagi berikutnya).
+     * Ambil quantity aktual untuk window shift: prioritas production_data (real-time),
+     * fallback production_data_hourly (history). Nilai = record terakhir dalam window
+     * (quantity di akhir shift), konsisten dengan chart quantity per jam.
      */
     private function getLatestMachineQuantityInWindow(?string $address, Carbon $startUtc, Carbon $endUtc, string $appTimezone = 'Asia/Jakarta'): int
     {
@@ -609,25 +608,44 @@ class AnalyticsController extends Controller
         $normalizedAddress = trim($address);
         $lowerAddress = strtolower($normalizedAddress);
 
-        // Sesuaikan window waktu dengan timezone aplikasi
         $startLocal = $startUtc->copy()->setTimezone($appTimezone);
         $endLocal = $endUtc->copy()->setTimezone($appTimezone);
         $startStr = $startLocal->format('Y-m-d H:i:s');
         $endStr = $endLocal->format('Y-m-d H:i:s');
 
-        // === Gunakan snapshot hourly (production_data_hourly) agar history tidak hilang ketika production_data dibersihkan ===
-        // Strategy 1: Exact match dari snapshot hourly dan gunakan selisih (last - first) dalam window
-        $series = ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
-            ->where('machine_name', $normalizedAddress)
-            ->orderBy('snapshot_at', 'asc')
-            ->get(['quantity']);
-        if ($series->isNotEmpty()) {
-            $first = (int) $series->first()->quantity;
-            $last = (int) $series->last()->quantity;
-            return max(0, $last - $first);
+        // 1) Coba production_data dulu (real-time): record terbaru dalam window
+        $windowBase = function () use ($startStr, $endStr) {
+            return ProductionData::whereBetween('timestamp', [$startStr, $endStr])
+                ->orderBy('timestamp', 'desc');
+        };
+        $latest = $windowBase()->where('machine_name', $normalizedAddress)->first();
+        if ($latest) {
+            return max(0, (int) $latest->quantity);
+        }
+        $latest = ProductionData::whereBetween('timestamp', [$startStr, $endStr])
+            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress])
+            ->orderBy('timestamp', 'desc')
+            ->first();
+        if ($latest) {
+            return max(0, (int) $latest->quantity);
+        }
+        $latest = ProductionData::whereBetween('timestamp', [$startStr, $endStr])
+            ->whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%'])
+            ->orderBy('timestamp', 'desc')
+            ->first();
+        if ($latest) {
+            return max(0, (int) $latest->quantity);
         }
 
-        // Strategy 2: Case-insensitive + trim pada snapshot hourly
+        // 2) Fallback: production_data_hourly (history) — snapshot terakhir dalam window = quantity akhir shift
+        $hourlyBase = function () use ($startStr, $endStr) {
+            return ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
+                ->orderBy('snapshot_at', 'desc');
+        };
+        $latest = $hourlyBase()->where('machine_name', $normalizedAddress)->first();
+        if ($latest) {
+            return max(0, (int) $latest->quantity);
+        }
         $latest = ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
             ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress])
             ->orderBy('snapshot_at', 'desc')
@@ -635,8 +653,6 @@ class AnalyticsController extends Controller
         if ($latest) {
             return max(0, (int) $latest->quantity);
         }
-
-        // Strategy 3: Partial match (last resort) pada snapshot hourly
         $latest = ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
             ->whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%'])
             ->orderBy('snapshot_at', 'desc')
