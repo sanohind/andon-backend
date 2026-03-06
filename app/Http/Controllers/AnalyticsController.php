@@ -434,7 +434,7 @@ class AnalyticsController extends Controller
     /**
      * Menentukan window UTC untuk shift terpilih.
      * Batas akhir 1 detik sebelum reset (06:59 / 19:59) agar data yang diambil bukan nilai setelah reset (0).
-     * Shift pagi: tanggal 07:00 - tanggal 19:58:59
+     * Shift pagi: tanggal 07:00 - tanggal 20:58:59
      * Shift malam: tanggal 21:00 - tanggal+1 06:58:59
      *
      * @return array{0: Carbon, 1: Carbon}
@@ -444,11 +444,11 @@ class AnalyticsController extends Controller
         $date = Carbon::parse($dateStr, $appTimezone);
 
         if ($shift === 'pagi') {
-            // Shift Pagi: 07:00 - 19:58:59 (reset jam 19:59)
+            // Shift Pagi: 07:00 - 20:58:59 (reset jam 21:00)
             $startApp = $date->copy()->setTime(7, 0, 0);
-            $endApp = $date->copy()->setTime(19, 58, 59);
+            $endApp = $date->copy()->setTime(20, 58, 59);
         } else {
-            // Shift Malam: 21:00 hari ini - 06:58:59 hari berikutnya (reset jam 06:59)
+            // Shift Malam: 21:00 hari ini - 06:58:59 hari berikutnya (reset jam 07:00)
             $startApp = $date->copy()->setTime(21, 0, 0);
             $endApp = $date->copy()->addDay()->setTime(6, 58, 59);
         }
@@ -595,9 +595,10 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Ambil quantity aktual untuk window shift: prioritas production_data (real-time),
-     * fallback production_data_hourly (history). Nilai = record terakhir dalam window
-     * (quantity di akhir shift), konsisten dengan chart quantity per jam.
+     * Ambil quantity aktual untuk window shift dari tabel production_data.
+     * Data dipilih berdasarkan timestamp (tanggal + jam) dalam rentang shift (pagi/malam).
+     * Nilai = record terakhir dalam window (quantity di akhir shift).
+     * Fallback ke production_data_hourly hanya jika production_data tidak punya data.
      */
     private function getLatestMachineQuantityInWindow(?string $address, Carbon $startUtc, Carbon $endUtc, string $appTimezone = 'Asia/Jakarta'): int
     {
@@ -613,7 +614,8 @@ class AnalyticsController extends Controller
         $startStr = $startLocal->format('Y-m-d H:i:s');
         $endStr = $endLocal->format('Y-m-d H:i:s');
 
-        // 1) Coba production_data dulu (real-time): record terbaru dalam window
+        // Selalu ambil dari production_data dulu (untuk history dan realtime).
+        // Timestamp berisi tanggal dan jam sehingga rentang shift (pagi/malam) bisa ditentukan.
         $windowBase = function () use ($startStr, $endStr) {
             return ProductionData::whereBetween('timestamp', [$startStr, $endStr])
                 ->orderBy('timestamp', 'desc');
@@ -637,7 +639,7 @@ class AnalyticsController extends Controller
             return max(0, (int) $latest->quantity);
         }
 
-        // 2) Fallback: production_data_hourly (history) — snapshot terakhir dalam window = quantity akhir shift
+        // Fallback: production_data_hourly hanya jika production_data tidak ada record dalam window
         $hourlyBase = function () use ($startStr, $endStr) {
             return ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
                 ->orderBy('snapshot_at', 'desc');
