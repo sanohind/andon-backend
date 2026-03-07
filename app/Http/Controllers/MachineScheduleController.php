@@ -20,6 +20,11 @@ class MachineScheduleController extends Controller
 
         $query = MachineSchedule::query()->orderBy('schedule_date', 'desc')->orderBy('machine_address');
 
+        // Optional filter by status (open / closed); if not set, return all
+        if ($request->filled('status') && in_array(strtolower($request->status), ['open', 'closed'])) {
+            $query->where('status', strtolower($request->status));
+        }
+
         if ($request->filled('search')) {
             $s = $request->search;
             $query->where(function ($q) use ($s) {
@@ -35,12 +40,17 @@ class MachineScheduleController extends Controller
         $addresses = $paginated->pluck('machine_address')->unique()->values()->all();
         $machines = InspectionTable::whereIn('address', $addresses)->get()->keyBy('address');
 
-        $data = $paginated->getCollection()->map(function ($row) use ($machines) {
+        $today = now()->startOfDay();
+        $data = $paginated->getCollection()->map(function ($row) use ($machines, $today) {
             $machine = $machines->get($row->machine_address);
             $machineName = $machine ? $machine->name : $row->machine_address;
-            $today = now()->startOfDay();
             $scheduleDate = $row->schedule_date->startOfDay();
-            $status = $scheduleDate->gt($today) || $scheduleDate->eq($today) ? 'OPEN' : 'CLOSED';
+            // Persist status: if date has passed and still open, update to closed so data never "disappears"
+            $status = $row->status ?? 'open';
+            if ($scheduleDate->lt($today) && $status === 'open') {
+                $row->update(['status' => 'closed']);
+                $status = 'closed';
+            }
             return [
                 'id' => $row->id,
                 'schedule_date' => $row->schedule_date->format('Y-m-d'),
@@ -52,7 +62,7 @@ class MachineScheduleController extends Controller
                 'ot_enabled' => (bool) $row->ot_enabled,
                 'ot_duration_type' => $row->ot_duration_type,
                 'target_ot' => $row->target_ot,
-                'status' => $status,
+                'status' => strtoupper($status),
             ];
         });
 
@@ -97,6 +107,7 @@ class MachineScheduleController extends Controller
             $validated['ot_duration_type'] = null;
             $validated['target_ot'] = null;
         }
+        $validated['status'] = $this->scheduleStatusForDate($validated['schedule_date']);
 
         $schedule = MachineSchedule::create($validated);
         return response()->json(['success' => true, 'data' => $schedule], 201);
@@ -134,6 +145,9 @@ class MachineScheduleController extends Controller
             $validated['ot_duration_type'] = null;
             $validated['target_ot'] = null;
         }
+        if (isset($validated['schedule_date'])) {
+            $validated['status'] = $this->scheduleStatusForDate($validated['schedule_date']);
+        }
 
         $schedule->update($validated);
         return response()->json(['success' => true, 'data' => $schedule]);
@@ -155,5 +169,17 @@ class MachineScheduleController extends Controller
         $schedule = MachineSchedule::findOrFail($id);
         $schedule->delete();
         return response()->json(['success' => true]);
+    }
+
+    /**
+     * Status for schedule: OPEN if date is today or future, CLOSED if past.
+     */
+    private function scheduleStatusForDate($scheduleDate): string
+    {
+        $date = $scheduleDate instanceof \Carbon\Carbon
+            ? $scheduleDate
+            : \Carbon\Carbon::parse($scheduleDate);
+        $today = now()->startOfDay();
+        return $date->startOfDay()->gte($today) ? 'open' : 'closed';
     }
 }

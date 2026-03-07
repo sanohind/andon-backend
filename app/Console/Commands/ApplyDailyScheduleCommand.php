@@ -6,6 +6,7 @@ use App\Models\MachineSchedule;
 use App\Models\InspectionTable;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Schema;
 
 class ApplyDailyScheduleCommand extends Command
 {
@@ -13,7 +14,7 @@ class ApplyDailyScheduleCommand extends Command
                             {--date= : Tanggal (Y-m-d), default hari ini}
                             {--shift=pagi : Shift (pagi/malam)}';
 
-    protected $description = 'Menerapkan schedule ke inspection_tables sesuai tanggal dan shift. Jalankan tiap hari untuk reset & isi ulang data mesin.';
+    protected $description = 'Menerapkan schedule ke inspection_tables sesuai tanggal dan shift. Reset target/OT mesin lalu isi dari schedule. Jadwalkan via Laravel Scheduler (php artisan schedule:run setiap menit).';
 
     public function handle(): int
     {
@@ -26,8 +27,9 @@ class ApplyDailyScheduleCommand extends Command
         }
 
         $date = Carbon::parse($dateStr, 'Asia/Jakarta')->startOfDay();
+        $today = Carbon::now('Asia/Jakarta')->startOfDay();
 
-        // Reset target & OT untuk semua mesin terlebih dahulu (agar mesin tanpa schedule juga ter-reset)
+        // 1. Reset target & OT untuk semua mesin (mesin tanpa schedule untuk hari ini jadi 0)
         InspectionTable::query()->update([
             'target_quantity' => 0,
             'ot_enabled' => false,
@@ -35,6 +37,7 @@ class ApplyDailyScheduleCommand extends Command
             'target_ot' => null,
         ]);
 
+        // 2. Terapkan schedule untuk tanggal + shift ini ke inspection_tables
         $schedules = MachineSchedule::whereDate('schedule_date', $date)
             ->where('shift', $shift)
             ->get();
@@ -54,6 +57,14 @@ class ApplyDailyScheduleCommand extends Command
             $table->save();
             $count++;
             $this->info("Applied: {$table->name} ({$s->machine_address}) - Target {$s->target_quantity}, Cavity {$s->cavity}");
+        }
+
+        // 3. Tandai schedule yang sudah lewat sebagai closed (data tidak dihapus, hanya status)
+        if (Schema::hasColumn((new MachineSchedule)->getTable(), 'status')) {
+            $closed = MachineSchedule::where('schedule_date', '<', $today)->where('status', 'open')->update(['status' => 'closed']);
+            if ($closed > 0) {
+                $this->info("Schedule yang sudah lewat diupdate status closed: {$closed} record.");
+            }
         }
 
         $this->info("Selesai. {$count} mesin diperbarui dari schedule {$dateStr} shift {$shift}.");

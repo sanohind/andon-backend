@@ -17,6 +17,7 @@ class MachineSchedule extends Model
         'ot_enabled',
         'ot_duration_type',
         'target_ot',
+        'status',
     ];
 
     protected $casts = [
