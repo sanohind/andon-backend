@@ -8,17 +8,69 @@ use Illuminate\Http\Request;
 
 class MachineScheduleController extends Controller
 {
+    private function getUserContextFromToken(Request $request): ?array
+    {
+        $token = $request->bearerToken() ?? $request->header('Authorization');
+        if (!$token) return null;
+        $token = str_replace('Bearer ', '', $token);
+        try {
+            $session = \Illuminate\Support\Facades\DB::table('user_sessions')
+                ->join('users', 'user_sessions.user_id', '=', 'users.id')
+                ->where('user_sessions.token', $token)
+                ->where('users.active', 1)
+                ->where('user_sessions.expires_at', '>', now(config('app.timezone')))
+                ->select('users.role', 'users.line_name', 'users.division')
+                ->first();
+            if (!$session) return null;
+            return [
+                'role' => $session->role,
+                'line_name' => $session->line_name,
+                'division' => $session->division,
+            ];
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
     /**
      * GET list schedule. Optional: search, per_page. Returns with machine name from inspection_tables.
      */
     public function index(Request $request)
     {
-        $role = $this->getUserRoleFromToken($request);
-        if (!in_array($role, ['admin', 'management'])) {
+        $ctx = $this->getUserContextFromToken($request);
+        $role = $ctx['role'] ?? null;
+        if (!in_array($role, ['admin', 'management', 'leader'])) {
             return response()->json(['success' => false, 'message' => 'Akses Ditolak'], 403);
         }
 
         $query = MachineSchedule::query()->orderBy('schedule_date', 'desc')->orderBy('machine_address');
+
+        // Leader hanya boleh melihat schedule untuk mesin di line-nya
+        if ($role === 'leader') {
+            $lineName = $ctx['line_name'] ?? null;
+            if (!$lineName) {
+                return response()->json([
+                    'success' => true,
+                    'data' => [],
+                    'current_page' => 1,
+                    'last_page' => 1,
+                    'per_page' => 10,
+                    'total' => 0,
+                ]);
+            }
+            $allowedAddresses = InspectionTable::where('line_name', $lineName)->pluck('address')->filter()->values()->all();
+            if (empty($allowedAddresses)) {
+                return response()->json([
+                    'success' => true,
+                    'data' => [],
+                    'current_page' => 1,
+                    'last_page' => 1,
+                    'per_page' => 10,
+                    'total' => 0,
+                ]);
+            }
+            $query->whereIn('machine_address', $allowedAddresses);
+        }
 
         // Optional filter by status (open / closed); if not set, return all
         if ($request->filled('status') && in_array(strtolower($request->status), ['open', 'closed'])) {
@@ -83,8 +135,9 @@ class MachineScheduleController extends Controller
         if ($this->blockManagementWrite($request)) {
             return $this->blockManagementWrite($request);
         }
-        $role = $this->getUserRoleFromToken($request);
-        if ($role !== 'admin') {
+        $ctx = $this->getUserContextFromToken($request);
+        $role = $ctx['role'] ?? null;
+        if (!in_array($role, ['admin', 'leader'])) {
             return response()->json(['success' => false, 'message' => 'Akses Ditolak'], 403);
         }
 
@@ -97,6 +150,14 @@ class MachineScheduleController extends Controller
             'ot_duration_type' => 'nullable|string|max:50',
             'target_ot' => 'nullable|integer|min:0',
         ]);
+
+        if ($role === 'leader') {
+            $lineName = $ctx['line_name'] ?? null;
+            $machine = InspectionTable::where('address', $validated['machine_address'])->first();
+            if (!$lineName || !$machine || (string) $machine->line_name !== (string) $lineName) {
+                return response()->json(['success' => false, 'message' => 'Akses Ditolak'], 403);
+            }
+        }
 
         $validated['shift'] = $validated['shift'] ?? 'pagi';
         $validated['ot_enabled'] = filter_var($validated['ot_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN);
@@ -118,12 +179,22 @@ class MachineScheduleController extends Controller
         if ($this->blockManagementWrite($request)) {
             return $this->blockManagementWrite($request);
         }
-        $role = $this->getUserRoleFromToken($request);
-        if ($role !== 'admin') {
+        $ctx = $this->getUserContextFromToken($request);
+        $role = $ctx['role'] ?? null;
+        if (!in_array($role, ['admin', 'leader'])) {
             return response()->json(['success' => false, 'message' => 'Akses Ditolak'], 403);
         }
 
         $schedule = MachineSchedule::findOrFail($id);
+
+        if ($role === 'leader') {
+            $lineName = $ctx['line_name'] ?? null;
+            $machine = InspectionTable::where('address', $schedule->machine_address)->first();
+            if (!$lineName || !$machine || (string) $machine->line_name !== (string) $lineName) {
+                return response()->json(['success' => false, 'message' => 'Akses Ditolak'], 403);
+            }
+        }
+
         $validated = $request->validate([
             'schedule_date' => 'sometimes|date',
             'machine_address' => 'sometimes|string|max:20',
@@ -133,6 +204,14 @@ class MachineScheduleController extends Controller
             'ot_duration_type' => 'nullable|string|max:50',
             'target_ot' => 'nullable|integer|min:0',
         ]);
+
+        if ($role === 'leader' && isset($validated['machine_address'])) {
+            $lineName = $ctx['line_name'] ?? null;
+            $machine = InspectionTable::where('address', $validated['machine_address'])->first();
+            if (!$lineName || !$machine || (string) $machine->line_name !== (string) $lineName) {
+                return response()->json(['success' => false, 'message' => 'Akses Ditolak'], 403);
+            }
+        }
 
         if (isset($validated['ot_enabled'])) {
             $validated['ot_enabled'] = filter_var($validated['ot_enabled'], FILTER_VALIDATE_BOOLEAN);
@@ -157,12 +236,22 @@ class MachineScheduleController extends Controller
         if ($this->blockManagementWrite($request)) {
             return $this->blockManagementWrite($request);
         }
-        $role = $this->getUserRoleFromToken($request);
-        if ($role !== 'admin') {
+        $ctx = $this->getUserContextFromToken($request);
+        $role = $ctx['role'] ?? null;
+        if (!in_array($role, ['admin', 'leader'])) {
             return response()->json(['success' => false, 'message' => 'Akses Ditolak'], 403);
         }
 
         $schedule = MachineSchedule::findOrFail($id);
+
+        if ($role === 'leader') {
+            $lineName = $ctx['line_name'] ?? null;
+            $machine = InspectionTable::where('address', $schedule->machine_address)->first();
+            if (!$lineName || !$machine || (string) $machine->line_name !== (string) $lineName) {
+                return response()->json(['success' => false, 'message' => 'Akses Ditolak'], 403);
+            }
+        }
+
         $schedule->delete();
         return response()->json(['success' => true]);
     }
