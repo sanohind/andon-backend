@@ -7,6 +7,8 @@ use App\Models\InspectionTable;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class ApplyDailyScheduleCommand extends Command
 {
@@ -34,38 +36,71 @@ class ApplyDailyScheduleCommand extends Command
             ->where('shift', $shift)
             ->get();
 
-        // 1. Reset target & OT untuk semua mesin (mesin tanpa schedule untuk hari ini jadi 0)
-        $machinesAddress = $schedules->pluck('machine_address')->toArray();
-        InspectionTable::query()->whereNotIn('address', $machinesAddress)
-        ->update([
-            'target_quantity' => 0,
-            'ot_enabled' => false,
-            'ot_duration_type' => null,
-            'target_ot' => null,
-        ]);
-
-        // 2. Terapkan schedule (target + OT) untuk tanggal + shift ini ke inspection_tables
-        $count = 0;
-        foreach ($schedules as $s) {
-            $table = InspectionTable::where('address', $s->machine_address)->first();
-            if (!$table) {
-                $this->warn("Mesin {$s->machine_address} tidak ditemukan di inspection_tables.");
-                continue;
-            }
-            $table->target_quantity = $s->target_quantity;
-            $table->ot_enabled = (bool) $s->ot_enabled;
-            $table->ot_duration_type = $s->ot_enabled ? $s->ot_duration_type : null;
-            $table->target_ot = $s->ot_enabled ? $s->target_ot : null;
-            $table->save();
-            $count++;
-            $this->info("Applied: {$table->name} ({$s->machine_address}) - Target {$s->target_quantity}");
+        if ($schedules->isEmpty()) {
+            $this->warn("Tidak ada schedule untuk tanggal {$dateStr} shift {$shift}.");
+            Log::warning('Schedule Kosong', ['date' => $dateStr, 'shift' => $shift]);
+            return 0;
         }
 
+        // 1. Reset target & OT untuk semua mesin (mesin tanpa schedule untuk hari ini jadi 0)
+        $machinesAddress = $schedules->pluck('machine_address')->toArray();
+        $count = 0;
+
+        DB::transaction(function () use ($schedules, $machinesAddress, $dateStr, $shift, &$count) {
+            InspectionTable::query()
+                ->whereNotIn('address', $machinesAddress)
+                ->update([
+                    'target_quantity' => 0,
+                    // PostgreSQL butuh literal boolean true/false, bukan 0/1
+                    'ot_enabled' => DB::raw('false'),
+                    'ot_duration_type' => null,
+                    'target_ot' => null,
+                ]);
+
+            // 2. Terapkan schedule ke inspection_tables
+            foreach ($schedules as $s) {
+
+                $table = InspectionTable::where('address', $s->machine_address)->first();
+
+                if (!$table) {
+
+                    $this->warn("Mesin {$s->machine_address} tidak ditemukan di inspection_tables.");
+                    // Logging jika mesin tidak ditemukan
+                    Log::error("Machine address tidak ditemukan", [
+                        'machine_address' => $s->machine_address
+                    ]);
+                
+
+                    continue;
+                }
+
+            
+                // Gunakan update() agar lebih clean
+                $table->update([
+                    'target_quantity' => $s->target_quantity,
+                    'ot_enabled' => (bool) $s->ot_enabled,
+                    'ot_duration_type' => $s->ot_enabled ? $s->ot_duration_type : null,
+                    'target_ot' => $s->ot_enabled ? $s->target_ot : null,
+                ]);
+
+                $count++;
+
+                $this->info("Applied: {$table->name} ({$s->machine_address}) - Target {$s->target_quantity}");
+            }
+            // Logging hasil schedule
+            Log::info("Schedule applied", [
+                'date' => $dateStr,
+                'shift' => $shift,
+                'machines_updated' => $count
+            ]);
+
+        });
         // 3. Tandai schedule yang sudah lewat sebagai closed (data tidak dihapus, hanya status)
         if (Schema::hasColumn((new MachineSchedule)->getTable(), 'status')) {
             $closed = MachineSchedule::where('schedule_date', '<', $today)->where('status', 'open')->update(['status' => 'closed']);
             if ($closed > 0) {
                 $this->info("Schedule yang sudah lewat diupdate status closed: {$closed} record.");
+                Log::info("Schedule closed otomatis", ['records' => $closed]);
             }
         }
 
