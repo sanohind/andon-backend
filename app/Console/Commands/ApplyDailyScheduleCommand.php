@@ -74,14 +74,19 @@ class ApplyDailyScheduleCommand extends Command
                     continue;
                 }
 
-            
-                // Gunakan update() agar lebih clean
-                $table->update([
-                    'target_quantity' => $s->target_quantity,
-                    'ot_enabled' => (bool) $s->ot_enabled,
-                    'ot_duration_type' => $s->ot_enabled ? $s->ot_duration_type : null,
-                    'target_ot' => $s->ot_enabled ? $s->target_ot : null,
-                ]);
+                $otEnabled = filter_var($s->ot_enabled ?? false, FILTER_VALIDATE_BOOLEAN);
+
+                // PostgreSQL boolean tidak menerima integer 0/1 pada update query.
+                // Pakai literal true/false agar aman di semua kondisi (enable/disable).
+                DB::table('inspection_tables')
+                    ->where('id', $table->id)
+                    ->update([
+                        'target_quantity' => (int) ($s->target_quantity ?? 0),
+                        'ot_enabled' => DB::raw($otEnabled ? 'true' : 'false'),
+                        'ot_duration_type' => $otEnabled ? ($s->ot_duration_type ?? null) : null,
+                        'target_ot' => $otEnabled ? ($s->target_ot ?? null) : null,
+                        'updated_at' => now(),
+                    ]);
 
                 $count++;
 
