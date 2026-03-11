@@ -13,7 +13,6 @@ class MachineSchedule extends Model
         'machine_address',
         'shift',
         'target_quantity',
-        'cavity',
         'ot_enabled',
         'ot_duration_type',
         'target_ot',
@@ -23,7 +22,6 @@ class MachineSchedule extends Model
     protected $casts = [
         'schedule_date' => 'date',
         'target_quantity' => 'integer',
-        'cavity' => 'integer',
         'target_ot' => 'integer',
     ];
 

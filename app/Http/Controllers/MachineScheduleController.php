@@ -58,7 +58,6 @@ class MachineScheduleController extends Controller
                 'shift' => $row->shift ?? 'pagi',
                 'machine_name' => $machineName,
                 'target_quantity' => $row->target_quantity,
-                'cavity' => $row->cavity,
                 'ot_enabled' => (bool) $row->ot_enabled,
                 'ot_duration_type' => $row->ot_duration_type,
                 'target_ot' => $row->target_ot,
@@ -94,14 +93,12 @@ class MachineScheduleController extends Controller
             'machine_address' => 'required|string|max:20',
             'shift' => 'nullable|string|in:pagi,malam',
             'target_quantity' => 'required|integer|min:0',
-            'cavity' => 'nullable|integer|min:1',
             'ot_enabled' => 'nullable',
             'ot_duration_type' => 'nullable|string|max:50',
             'target_ot' => 'nullable|integer|min:0',
         ]);
 
         $validated['shift'] = $validated['shift'] ?? 'pagi';
-        $validated['cavity'] = $validated['cavity'] ?? 1;
         $validated['ot_enabled'] = filter_var($validated['ot_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN);
         if (!$validated['ot_enabled']) {
             $validated['ot_duration_type'] = null;
@@ -132,7 +129,6 @@ class MachineScheduleController extends Controller
             'machine_address' => 'sometimes|string|max:20',
             'shift' => 'nullable|string|in:pagi,malam',
             'target_quantity' => 'sometimes|integer|min:0',
-            'cavity' => 'nullable|integer|min:1',
             'ot_enabled' => 'nullable',
             'ot_duration_type' => 'nullable|string|max:50',
             'target_ot' => 'nullable|integer|min:0',
