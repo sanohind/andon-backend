@@ -10,6 +10,7 @@ use App\Models\InspectionTable;
 use App\Models\ProductionData;
 use App\Models\ProductionDataHourly;
 use App\Models\BreakSchedule;
+use App\Models\MachineSchedule;
 use Carbon\Carbon;
 
 class AnalyticsController extends Controller
@@ -211,34 +212,45 @@ class AnalyticsController extends Controller
                 ->orderBy('name')
                 ->get();
 
+            $allAddresses = $machines->pluck('address')->filter()->values()->all();
+            $scheduleMap = $this->buildScheduleMapForDates($dates, $allAddresses, $shift);
+
             $machinesData = [];
             foreach ($machines as $machine) {
-                $targetPerDay = (int) ($machine->target_quantity ?? 0);
                 $cavity = (int) ($machine->cavity ?? 1);
                 if ($cavity < 1) {
                     $cavity = 1;
                 }
                 $totalActual = 0;
                 $totalActualRegular = 0;
+                $totalTarget = 0;
+                $totalTargetOt = 0;
+                $anyOtEnabled = false;
 
                 foreach ($dates as $dateStr) {
+                    $schedule = $scheduleMap[$dateStr][$machine->address] ?? null;
+                    $targetForDate = $schedule ? (int) ($schedule->target_quantity ?? 0) : 0;
+                    $totalTarget += $targetForDate;
+
                     [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
                     $actualForDate = $this->getLatestMachineQuantityInWindow($machine->address, $startUtc, $endUtc, $appTimezone);
                     $totalActual += $actualForDate;
 
-                    if ($machine->ot_enabled) {
+                    if ($schedule && $schedule->ot_enabled) {
+                        $anyOtEnabled = true;
+                        $totalTargetOt += (int) ($schedule->target_ot ?? 0);
                         [$_, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
                         $actualRegularForDate = $this->getLatestMachineQuantityInWindow($machine->address, $startUtc, $endRegulerUtc, $appTimezone);
                         $totalActualRegular += $actualRegularForDate;
+                    } else {
+                        $totalActualRegular += $actualForDate;
                     }
                 }
 
-                $totalTarget = $targetPerDay * $productionDays;
-                $actualOt = $machine->ot_enabled ? max(0, $totalActual - $totalActualRegular) : 0;
-                $actualRegular = $machine->ot_enabled ? $totalActualRegular : $totalActual;
-                $targetOt = $machine->ot_enabled && $machine->target_ot !== null ? (int) $machine->target_ot * $productionDays : null;
+                $actualOt = $anyOtEnabled ? max(0, $totalActual - $totalActualRegular) : 0;
+                $actualRegular = $anyOtEnabled ? $totalActualRegular : $totalActual;
+                $targetOt = $anyOtEnabled && $totalTargetOt > 0 ? $totalTargetOt : null;
 
-                // Hanya quantity aktual yang dikalikan cavity
                 $actualQuantityWithCavity = $totalActual * $cavity;
                 $actualRegularWithCavity = $actualRegular * $cavity;
                 $actualOtWithCavity = $actualOt * $cavity;
@@ -246,13 +258,12 @@ class AnalyticsController extends Controller
                 $machinesData[] = [
                     'name' => $machine->name,
                     'address' => $machine->address,
-                    // Target disimpan apa adanya (sudah disesuaikan manual dengan cavity)
                     'target_quantity' => $totalTarget,
                     'actual_quantity' => $actualQuantityWithCavity,
                     'actual_quantity_regular' => $actualRegularWithCavity,
                     'actual_quantity_ot' => $actualOtWithCavity,
                     'target_ot' => $targetOt,
-                    'ot_enabled' => (bool) $machine->ot_enabled,
+                    'ot_enabled' => $anyOtEnabled,
                 ];
             }
 
@@ -399,6 +410,34 @@ class AnalyticsController extends Controller
 
         $this->cavityCache[$key] = $cavity;
         return $cavity;
+    }
+
+    /**
+     * Build map [dateStr][address] => MachineSchedule untuk target history dari schedule.
+     */
+    private function buildScheduleMapForDates(array $dates, array $addresses, string $shift): array
+    {
+        if (empty($addresses) || empty($dates)) {
+            return [];
+        }
+        $schedules = MachineSchedule::query()
+            ->whereIn('schedule_date', $dates)
+            ->where('shift', $shift)
+            ->whereIn('machine_address', $addresses)
+            ->get();
+        $map = [];
+        foreach ($dates as $d) {
+            $map[$d] = [];
+        }
+        foreach ($schedules as $s) {
+            $dateStr = $s->schedule_date instanceof \Carbon\Carbon
+                ? $s->schedule_date->format('Y-m-d')
+                : $s->schedule_date;
+            if (isset($map[$dateStr])) {
+                $map[$dateStr][$s->machine_address] = $s;
+            }
+        }
+        return $map;
     }
 
     /**
