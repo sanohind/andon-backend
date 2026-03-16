@@ -3,6 +3,7 @@
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
+use Carbon\Carbon;
 
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
@@ -15,16 +16,30 @@ Schedule::command('production:hourly-snapshot')
     ->withoutOverlapping()
     ->runInBackground();
 
-// Terapkan schedule ke inspection_tables: shift pagi jam 00:05, shift malam jam 16:05
+// Terapkan schedule ke inspection_tables:
+// - Shift pagi: jalan tiap jam dalam window jam 07:00–20:59
+// - Shift malam: jalan tiap jam dalam window jam 21:00–06:59
 Schedule::command('schedule:apply-daily', ['--shift' => 'pagi'])
-    ->dailyAt('07:00')
+    ->hourly()
     ->timezone(config('app.timezone', 'Asia/Jakarta'))
+    ->when(function () {
+        $now = Carbon::now(config('app.timezone', 'Asia/Jakarta'));
+        $hour = (int) $now->format('H');
+        // Window shift pagi: 07:00–20:59
+        return $hour >= 7 && $hour < 21;
+    })
     ->withoutOverlapping()
     ->runInBackground();
 
 Schedule::command('schedule:apply-daily', ['--shift' => 'malam'])
-    ->dailyAt('21:00')
+    ->hourly()
     ->timezone(config('app.timezone', 'Asia/Jakarta'))
+    ->when(function () {
+        $now = Carbon::now(config('app.timezone', 'Asia/Jakarta'));
+        $hour = (int) $now->format('H');
+        // Window shift malam: 21:00–06:59
+        return $hour >= 21 || $hour < 7;
+    })
     ->withoutOverlapping()
     ->runInBackground();
 
