@@ -473,7 +473,7 @@ class AnalyticsController extends Controller
     /**
      * Menentukan window UTC untuk shift terpilih.
      * Batas akhir 1 detik sebelum reset (06:59 / 19:59) agar data yang diambil bukan nilai setelah reset (0).
-     * Shift pagi: tanggal 07:00 - tanggal 20:58:59
+     * Shift pagi: tanggal 07:00 - tanggal 19:59:59
      * Shift malam: tanggal 21:00 - tanggal+1 06:58:59
      *
      * @return array{0: Carbon, 1: Carbon}
@@ -483,9 +483,9 @@ class AnalyticsController extends Controller
         $date = Carbon::parse($dateStr, $appTimezone);
 
         if ($shift === 'pagi') {
-            // Shift Pagi: 07:00 - 20:58:59 (reset jam 21:00)
+            // Shift Pagi: 07:00 - 19:59:59 (hindari nilai setelah reset jam 20:00/21:00)
             $startApp = $date->copy()->setTime(7, 0, 0);
-            $endApp = $date->copy()->setTime(20, 58, 59);
+            $endApp = $date->copy()->setTime(19, 59, 59);
         } else {
             // Shift Malam: 21:00 hari ini - 06:58:59 hari berikutnya (reset jam 07:00)
             $startApp = $date->copy()->setTime(21, 0, 0);

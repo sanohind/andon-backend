@@ -17,7 +17,7 @@ Schedule::command('production:hourly-snapshot')
     ->runInBackground();
 
 // Terapkan schedule ke inspection_tables:
-// - Shift pagi: jalan tiap jam dalam window jam 07:00–20:59
+// - Shift pagi: jalan tiap jam dalam window jam 07:00–19:59
 // - Shift malam: jalan tiap jam dalam window jam 21:00–06:59
 Schedule::command('schedule:apply-daily', ['--shift' => 'pagi'])
     ->hourly()
@@ -25,8 +25,8 @@ Schedule::command('schedule:apply-daily', ['--shift' => 'pagi'])
     ->when(function () {
         $now = Carbon::now(config('app.timezone', 'Asia/Jakarta'));
         $hour = (int) $now->format('H');
-        // Window shift pagi: 07:00–20:59
-        return $hour >= 7 && $hour < 21;
+        // Window shift pagi: 07:00–19:59
+        return $hour >= 7 && $hour < 20;
     })
     ->withoutOverlapping()
     ->runInBackground();
