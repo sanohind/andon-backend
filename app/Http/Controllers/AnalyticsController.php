@@ -483,11 +483,11 @@ class AnalyticsController extends Controller
         $date = Carbon::parse($dateStr, $appTimezone);
 
         if ($shift === 'pagi') {
-            // Shift Pagi: 07:00 - 19:59:59 (hindari nilai setelah reset jam 20:00/21:00)
+            // Shift Pagi: 07:00:00 - 19:59:59 (pembacaan chart Production Quantity & quantity hourly)
             $startApp = $date->copy()->setTime(7, 0, 0);
             $endApp = $date->copy()->setTime(19, 59, 59);
         } else {
-            // Shift Malam: 21:00 hari ini - 06:58:59 hari berikutnya (reset jam 07:00)
+            // Shift Malam: 21:00 hari ini - 06:58:59 hari berikutnya (sebelum reset jam 07:00)
             $startApp = $date->copy()->setTime(21, 0, 0);
             $endApp = $date->copy()->addDay()->setTime(6, 58, 59);
         }
