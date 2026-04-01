@@ -485,10 +485,10 @@ class AnalyticsController extends Controller
         if ($shift === 'pagi') {
             // Shift Pagi: 07:00:00 - 19:59:59 (pembacaan chart Production Quantity & quantity hourly)
             $startApp = $date->copy()->setTime(7, 0, 0);
-            $endApp = $date->copy()->setTime(19, 59, 59);
+            $endApp = $date->copy()->setTime(19, 58, 59);
         } else {
             // Shift Malam: 21:00 hari ini - 06:58:59 hari berikutnya (sebelum reset jam 07:00)
-            $startApp = $date->copy()->setTime(21, 0, 0);
+            $startApp = $date->copy()->setTime(20, 0, 0);
             $endApp = $date->copy()->addDay()->setTime(6, 58, 59);
         }
 
