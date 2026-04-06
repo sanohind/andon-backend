@@ -38,7 +38,7 @@ Schedule::command('schedule:apply-daily', ['--shift' => 'malam'])
         $now = Carbon::now(config('app.timezone', 'Asia/Jakarta'));
         $hour = (int) $now->format('H');
         // Window shift malam: 21:00–06:59
-        return $hour >= 21 || $hour < 7;
+        return $hour >= 20 || $hour < 7;
     })
     ->withoutOverlapping()
     ->runInBackground();
