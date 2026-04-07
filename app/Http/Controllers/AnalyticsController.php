@@ -9,6 +9,8 @@ use App\Models\TicketingProblem;
 use App\Models\InspectionTable;
 use App\Models\ProductionData;
 use App\Models\ProductionDataHourly;
+use App\Models\OeeRecord;
+use App\Models\OeeRecordHourly;
 use App\Models\BreakSchedule;
 use App\Models\MachineSchedule;
 use Carbon\Carbon;
@@ -293,6 +295,181 @@ class AnalyticsController extends Controller
     }
 
     /**
+     * OEE per mesin per line — filter tanggal/shift/divisi sama seperti Production Quantity.
+     * Sumber utama: oee_records; fallback dari production + running hour jika belum ada snapshot.
+     */
+    public function getLineOeeComparison(Request $request)
+    {
+        $request->validate([
+            'division' => 'nullable|string',
+            'period' => 'required|in:daily,monthly,yearly',
+            'date' => 'required_if:period,daily|nullable|date_format:Y-m-d',
+            'month' => 'required_if:period,monthly|nullable|date_format:Y-m',
+            'year' => 'required_if:period,yearly|nullable|date_format:Y',
+            'shift' => 'required|in:pagi,malam',
+        ]);
+
+        $availableDivisions = InspectionTable::select('division')
+            ->whereNotNull('division')
+            ->distinct()
+            ->orderBy('division')
+            ->get()
+            ->pluck('division')
+            ->filter()
+            ->values();
+
+        if ($availableDivisions->isEmpty()) {
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'divisions' => [],
+                    'division' => null,
+                    'lines' => [],
+                ]
+            ]);
+        }
+
+        $selectedDivision = $request->division ?: $availableDivisions->first();
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $period = $request->period;
+        $shift = $request->shift;
+
+        $dateRange = $this->resolveQuantityDateRange($period, $request->date, $request->month, $request->year, $appTimezone);
+        if (!$dateRange) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid date/month/year for period.',
+                'data' => ['lines' => []]
+            ], 422);
+        }
+
+        [$dates, $filterLabel, $productionDays] = $dateRange;
+
+        $linesInDivision = InspectionTable::select('line_name')
+            ->where('division', $selectedDivision)
+            ->whereNotNull('line_name')
+            ->distinct()
+            ->orderBy('line_name')
+            ->get();
+
+        $linesData = [];
+        foreach ($linesInDivision as $lineInfo) {
+            $lineName = $lineInfo->line_name;
+            $machines = InspectionTable::where('line_name', $lineName)
+                ->where('division', $selectedDivision)
+                ->whereNotNull('address')
+                ->orderBy('name')
+                ->get();
+
+            $machinesData = [];
+            foreach ($machines as $machine) {
+                $oeeSum = 0.0;
+                $aSum = 0.0;
+                $pSum = 0.0;
+                $qSum = 0.0;
+                $cnt = 0;
+
+                foreach ($dates as $dateStr) {
+                    $rec = OeeRecord::query()
+                        ->where('shift_date', $dateStr)
+                        ->where('shift', $shift)
+                        ->where('machine_address', $machine->address)
+                        ->first();
+
+                    if ($rec && $rec->oee_percent !== null) {
+                        $oeeSum += (float) $rec->oee_percent;
+                        $aSum += (float) ($rec->availability_percent ?? 0);
+                        $pSum += (float) ($rec->performance_percent ?? 0);
+                        $qSum += (float) ($rec->quality_percent ?? 100);
+                        $cnt++;
+                    } else {
+                        $fb = $this->computeOeeFallbackForShiftDay($machine, $dateStr, $shift, $appTimezone);
+                        if ($fb['oee'] !== null) {
+                            $oeeSum += $fb['oee'];
+                            $aSum += (float) ($fb['availability'] ?? 0);
+                            $pSum += (float) ($fb['performance'] ?? 0);
+                            $qSum += (float) ($fb['quality'] ?? 100);
+                            $cnt++;
+                        }
+                    }
+                }
+
+                $machinesData[] = [
+                    'name' => $machine->name,
+                    'address' => $machine->address,
+                    'oee_percent' => $cnt > 0 ? round($oeeSum / $cnt, 2) : null,
+                    'availability_percent' => $cnt > 0 ? round($aSum / $cnt, 2) : null,
+                    'performance_percent' => $cnt > 0 ? round($pSum / $cnt, 2) : null,
+                    'quality_percent' => $cnt > 0 ? round($qSum / $cnt, 2) : 100.0,
+                ];
+            }
+
+            $linesData[] = [
+                'line_name' => $lineName,
+                'machines' => $machinesData,
+            ];
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'divisions' => $availableDivisions,
+                'division' => $selectedDivision,
+                'lines' => $linesData,
+                'filter' => [
+                    'period' => $period,
+                    'period_label' => $period === 'daily' ? 'Harian' : ($period === 'monthly' ? 'Bulanan' : 'Tahunan'),
+                    'shift' => $shift,
+                    'shift_label' => $shift === 'pagi' ? 'Shift Pagi' : 'Shift Malam',
+                    'filter_label' => $filterLabel,
+                    'production_days' => $productionDays,
+                    'timezone' => $appTimezone,
+                ],
+            ]
+        ]);
+    }
+
+    /**
+     * Fallback OEE jika belum ada baris oee_records (tanpa data runtime historis → runtime = running hour).
+     */
+    private function computeOeeFallbackForShiftDay(InspectionTable $machine, string $dateStr, string $shift, string $appTimezone): array
+    {
+        $address = trim($machine->address ?? '');
+        if ($address === '') {
+            return ['oee' => null, 'availability' => null, 'performance' => null, 'quality' => 100.0];
+        }
+
+        $cavity = (int) ($machine->cavity ?? 1);
+        if ($cavity < 1) {
+            $cavity = 1;
+        }
+        $cycle = (int) ($machine->cycle_time ?? 0);
+
+        [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
+        $startApp = $startUtc->copy()->setTimezone($appTimezone);
+        $endApp = $endUtc->copy()->setTimezone($appTimezone);
+
+        $qty = $this->getLatestMachineQuantityInWindow($address, $startUtc, $endUtc, $appTimezone);
+        $rh = $this->computeRunningHourSecondsForSnapshot($endApp, $startApp, $shift, $appTimezone);
+        $rt = $rh;
+
+        $totalProduct = max(0, $qty) * $cavity;
+        $idealBoard = ($cycle > 0 && $rh > 0) ? (int) floor($rh / $cycle) * $cavity : 0;
+        $idealPerf = ($cycle > 0 && $rt > 0) ? (int) floor($rt / $cycle) * $cavity : 0;
+
+        $oee = ($idealBoard > 0) ? round(($totalProduct / $idealBoard) * 100, 2) : null;
+        $availability = ($rh > 0) ? round(($rt / $rh) * 100, 2) : null;
+        $performance = ($idealPerf > 0) ? round(($totalProduct / $idealPerf) * 100, 2) : null;
+
+        return [
+            'oee' => $oee,
+            'availability' => $availability,
+            'performance' => $performance,
+            'quality' => 100.0,
+        ];
+    }
+
+    /**
      * Data quantity per jam dari production_data_hourly untuk satu mesin (grafik line per jam).
      * Query sesuai tanggal dan shift yang dipilih.
      * - Aktual reguler hanya sampai 15:58 (pagi) dan 04:58 (malam); 16:58 dan 05:58 ke atas = OT.
@@ -356,6 +533,54 @@ class AnalyticsController extends Controller
             'success' => true,
             'data' => $data,
             'ot_enabled' => $otEnabled,
+        ]);
+    }
+
+    /**
+     * OEE per jam dari oee_records_hourly untuk satu mesin (line + stacked A/P/Q).
+     */
+    public function getOeeHourly(Request $request)
+    {
+        $request->validate([
+            'date' => 'required|date_format:Y-m-d',
+            'shift' => 'required|in:pagi,malam',
+            'machine_address' => 'required|string',
+        ]);
+
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $address = trim($request->machine_address);
+
+        [$startUtc, $endUtc] = $this->resolveShiftWindow(
+            $request->date,
+            $request->shift,
+            $appTimezone
+        );
+        $startApp = $startUtc->copy()->setTimezone($appTimezone);
+        $endApp = $endUtc->copy()->setTimezone($appTimezone);
+        $startStr = $startApp->format('Y-m-d H:i:s');
+        $endStr = $endApp->format('Y-m-d H:i:s');
+
+        $rows = OeeRecordHourly::query()
+            ->where('machine_address', $address)
+            ->whereBetween('snapshot_at', [$startStr, $endStr])
+            ->orderBy('snapshot_at', 'asc')
+            ->get();
+
+        $data = $rows->map(function ($row) use ($appTimezone) {
+            $snapshotAtApp = $row->snapshot_at->copy()->setTimezone($appTimezone);
+
+            return [
+                'snapshot_at' => $snapshotAtApp->format('Y-m-d H:i'),
+                'oee_percent' => $row->oee_percent !== null ? round((float) $row->oee_percent, 2) : null,
+                'availability_percent' => $row->availability_percent !== null ? round((float) $row->availability_percent, 2) : null,
+                'performance_percent' => $row->performance_percent !== null ? round((float) $row->performance_percent, 2) : null,
+                'quality_percent' => $row->quality_percent !== null ? round((float) $row->quality_percent, 2) : 100.0,
+            ];
+        })->values();
+
+        return response()->json([
+            'success' => true,
+            'data' => $data,
         ]);
     }
 

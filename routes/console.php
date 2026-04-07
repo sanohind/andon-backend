@@ -16,6 +16,13 @@ Schedule::command('production:hourly-snapshot')
     ->withoutOverlapping()
     ->runInBackground();
 
+// Snapshot OEE (setelah production snapshot agar quantity konsisten)
+Schedule::command('oee:hourly-snapshot')
+    ->hourlyAt(1)
+    ->timezone(config('app.timezone', 'Asia/Jakarta'))
+    ->withoutOverlapping()
+    ->runInBackground();
+
 // Terapkan schedule ke inspection_tables:
 // - Shift pagi: jalan tiap jam dalam window jam 07:00–19:59
 // - Shift malam: jalan tiap jam dalam window jam 21:00–06:59

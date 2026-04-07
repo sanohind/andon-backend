@@ -10,6 +10,8 @@ use App\Models\Division;
 use App\Models\Line;
 use App\Models\MachineRuntimeState;
 use App\Models\BreakSchedule;
+use App\Models\OeeRecord;
+use App\Models\OeeRecordHourly;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -3330,5 +3332,111 @@ class DashboardController extends Controller
                 'error' => $th->getMessage()
             ]);
         }
+    }
+
+    /**
+     * Hitung metrik OEE (sama definisi dengan dashboard production monitoring).
+     */
+    private function computeOeeMetricsFromPrimitives(int $quantity, int $cavity, int $cycleSeconds, int $runtimeSeconds, int $runningHourSeconds): array
+    {
+        $cavity = max(1, $cavity);
+        $cycleSeconds = max(0, $cycleSeconds);
+        $runtimeSeconds = max(0, $runtimeSeconds);
+        $runningHourSeconds = max(0, $runningHourSeconds);
+        $totalProduct = max(0, $quantity) * $cavity;
+
+        $idealBoard = ($cycleSeconds > 0 && $runningHourSeconds > 0)
+            ? (int) floor($runningHourSeconds / $cycleSeconds) * $cavity
+            : 0;
+        $idealPerf = ($cycleSeconds > 0 && $runtimeSeconds > 0)
+            ? (int) floor($runtimeSeconds / $cycleSeconds) * $cavity
+            : 0;
+
+        $oee = ($idealBoard > 0) ? round(($totalProduct / $idealBoard) * 100, 2) : null;
+        $availability = ($runningHourSeconds > 0) ? round(($runtimeSeconds / $runningHourSeconds) * 100, 2) : null;
+        $performance = ($idealPerf > 0) ? round(($totalProduct / $idealPerf) * 100, 2) : null;
+        $quality = 100.0;
+
+        return [
+            'oee' => $oee,
+            'availability' => $availability,
+            'performance' => $performance,
+            'quality' => $quality,
+            'total_product' => $totalProduct,
+        ];
+    }
+
+    /**
+     * Simpan snapshot OEE per jam untuk semua mesin (scheduler / artisan oee:hourly-snapshot).
+     */
+    public function captureOeeHourlySnapshot(): int
+    {
+        $now = Carbon::now(config('app.timezone'));
+        $request = Request::create('/', 'GET');
+        $grouped = $this->getMachineStatuses($request);
+
+        $shiftInfo = $this->getShiftInfo($now);
+        $shiftDate = $shiftInfo['shiftStart']->format('Y-m-d');
+        $shift = $shiftInfo['shift'];
+
+        $cycles = InspectionTable::query()->pluck('cycle_time', 'address');
+        $divisions = InspectionTable::query()->pluck('division', 'address');
+
+        $count = 0;
+        foreach ($grouped as $lineName => $machines) {
+            foreach ($machines as $m) {
+                $addr = trim($m['machine_address'] ?? $m['address'] ?? '');
+                if ($addr === '') {
+                    continue;
+                }
+
+                $cycle = (int) ($cycles[$addr] ?? 0);
+                $cavity = max(1, (int) ($m['cavity'] ?? 1));
+                $qty = (int) ($m['quantity'] ?? 0);
+                $rt = (int) ($m['runtime_seconds'] ?? 0);
+                $rh = (int) ($m['running_hour_seconds'] ?? 0);
+
+                $metrics = $this->computeOeeMetricsFromPrimitives($qty, $cavity, $cycle, $rt, $rh);
+
+                OeeRecordHourly::create([
+                    'snapshot_at' => $now->copy()->format('Y-m-d H:i:s'),
+                    'machine_address' => $addr,
+                    'line_name' => $m['line_name'] ?? $lineName,
+                    'division' => $divisions[$addr] ?? null,
+                    'oee_percent' => $metrics['oee'],
+                    'availability_percent' => $metrics['availability'],
+                    'performance_percent' => $metrics['performance'],
+                    'quality_percent' => $metrics['quality'],
+                    'runtime_seconds' => $rt,
+                    'running_hour_seconds' => $rh,
+                    'total_product' => $metrics['total_product'],
+                ]);
+
+                OeeRecord::updateOrCreate(
+                    [
+                        'shift_date' => $shiftDate,
+                        'shift' => $shift,
+                        'machine_address' => $addr,
+                    ],
+                    [
+                        'machine_name' => $m['name'] ?? $addr,
+                        'line_name' => $m['line_name'] ?? $lineName,
+                        'division' => $divisions[$addr] ?? null,
+                        'oee_percent' => $metrics['oee'],
+                        'availability_percent' => $metrics['availability'],
+                        'performance_percent' => $metrics['performance'],
+                        'quality_percent' => $metrics['quality'],
+                        'runtime_seconds' => $rt,
+                        'running_hour_seconds' => $rh,
+                        'total_product' => $metrics['total_product'],
+                        'snapshot_at' => $now,
+                    ]
+                );
+
+                $count++;
+            }
+        }
+
+        return $count;
     }
 }
