@@ -549,6 +549,7 @@ class AnalyticsController extends Controller
 
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
         $address = trim($request->machine_address);
+        $addressLower = strtolower($address);
 
         [$startUtc, $endUtc] = $this->resolveShiftWindow(
             $request->date,
@@ -566,8 +567,19 @@ class AnalyticsController extends Controller
             ->orderBy('snapshot_at', 'asc')
             ->get();
 
+        if ($rows->isEmpty() && $address !== '') {
+            $rows = OeeRecordHourly::query()
+                ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
+                ->whereBetween('snapshot_at', [$startStr, $endStr])
+                ->orderBy('snapshot_at', 'asc')
+                ->get();
+        }
+
         $data = $rows->map(function ($row) use ($appTimezone) {
-            $snapshotAtApp = $row->snapshot_at->copy()->setTimezone($appTimezone);
+            $snapshotAt = $row->snapshot_at;
+            $snapshotAtApp = $snapshotAt instanceof Carbon
+                ? $snapshotAt->copy()->setTimezone($appTimezone)
+                : Carbon::parse($snapshotAt)->setTimezone($appTimezone);
 
             return [
                 'snapshot_at' => $snapshotAtApp->format('Y-m-d H:i'),
