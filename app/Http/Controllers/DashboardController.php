@@ -12,6 +12,7 @@ use App\Models\MachineRuntimeState;
 use App\Models\BreakSchedule;
 use App\Models\OeeRecord;
 use App\Models\OeeRecordHourly;
+use App\Support\RunningHourOtExtension;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -572,7 +573,9 @@ class DashboardController extends Controller
                         $finalStatus,
                         $problemType,
                         $timestamp,
-                        $runtimeStates->get($machineAddress)
+                        $runtimeStates->get($machineAddress),
+                        (bool) ($table->ot_enabled ?? false),
+                        $table->ot_duration_type ?? null
                     );
                     $runtimeSeconds = $runtimeData['runtime_seconds'];
                     $runningHourSeconds = $runtimeData['running_hour_seconds'];
@@ -584,7 +587,13 @@ class DashboardController extends Controller
                     ]);
                     // Fallback: running hour saja (runtime 0 agar dashboard tidak error)
                     try {
-                        $runningHourSeconds = $this->computeRunningHourSeconds($now, $shiftInfo['shiftStart'], $shiftInfo['shift']);
+                        $runningHourSeconds = $this->computeRunningHourSeconds(
+                            $now,
+                            $shiftInfo['shiftStart'],
+                            $shiftInfo['shift'],
+                            (bool) ($table->ot_enabled ?? false),
+                            $table->ot_duration_type ?? null
+                        );
                     } catch (\Throwable $e2) {
                         \Log::warning('Running hour calculation also failed: ' . $e2->getMessage());
                     }
@@ -592,7 +601,13 @@ class DashboardController extends Controller
             } else {
                 // Jika address kosong, hitung running hour saja
                 try {
-                    $runningHourSeconds = $this->computeRunningHourSeconds($now, $shiftInfo['shiftStart'], $shiftInfo['shift']);
+                    $runningHourSeconds = $this->computeRunningHourSeconds(
+                        $now,
+                        $shiftInfo['shiftStart'],
+                        $shiftInfo['shift'],
+                        (bool) ($table->ot_enabled ?? false),
+                        $table->ot_duration_type ?? null
+                    );
                 } catch (\Throwable $e) {
                     \Log::warning('Running hour calculation failed for machine without address: ' . $e->getMessage());
                 }
@@ -814,7 +829,9 @@ class DashboardController extends Controller
                         $finalStatus,
                         $problemType,
                         $timestamp,
-                        $runtimeStates->get($machineAddress)
+                        $runtimeStates->get($machineAddress),
+                        (bool) ($table->ot_enabled ?? false),
+                        $table->ot_duration_type ?? null
                     );
                     $runtimeSeconds = $runtimeData['runtime_seconds'];
                     $runningHourSeconds = $runtimeData['running_hour_seconds'];
@@ -824,14 +841,26 @@ class DashboardController extends Controller
                         'trace' => $e->getTraceAsString(),
                     ]);
                     try {
-                        $runningHourSeconds = $this->computeRunningHourSeconds($now, $shiftInfo['shiftStart'], $shiftInfo['shift']);
+                        $runningHourSeconds = $this->computeRunningHourSeconds(
+                            $now,
+                            $shiftInfo['shiftStart'],
+                            $shiftInfo['shift'],
+                            (bool) ($table->ot_enabled ?? false),
+                            $table->ot_duration_type ?? null
+                        );
                     } catch (\Throwable $e2) {
                         \Log::warning('Running hour calculation also failed (role-filtered): ' . $e2->getMessage());
                     }
                 }
             } else {
                 try {
-                    $runningHourSeconds = $this->computeRunningHourSeconds($now, $shiftInfo['shiftStart'], $shiftInfo['shift']);
+                    $runningHourSeconds = $this->computeRunningHourSeconds(
+                        $now,
+                        $shiftInfo['shiftStart'],
+                        $shiftInfo['shift'],
+                        (bool) ($table->ot_enabled ?? false),
+                        $table->ot_duration_type ?? null
+                    );
                 } catch (\Throwable $e) {
                     \Log::warning('Running hour calculation failed (role-filtered) for machine without address: ' . $e->getMessage());
                 }
@@ -1026,14 +1055,20 @@ class DashboardController extends Controller
      * Hitung Running Hour (detik) - waktu kerja efektif tanpa istirahat.
      * Menggunakan break schedule untuk mengurangi waktu istirahat.
      */
-    private function computeRunningHourSeconds(Carbon $now, Carbon $shiftStart, string $shift): int
-    {
+    private function computeRunningHourSeconds(
+        Carbon $now,
+        Carbon $shiftStart,
+        string $shift,
+        bool $otEnabled = false,
+        ?string $otDurationType = null
+    ): int {
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
         $now = $now->copy()->setTimezone($appTimezone);
         $shiftStart = $shiftStart->copy()->setTimezone($appTimezone);
         
         $elapsed = max(0, $shiftStart->diffInSeconds($now));
-        $maxSeconds = 9 * 3600;
+        $otSec = RunningHourOtExtension::extraSeconds($otEnabled, $otDurationType, $shift);
+        $maxSeconds = 9 * 3600 + $otSec;
         
         try {
             $dayOfWeek = $shiftStart->isoWeekday(); // 1 (Senin) - 7 (Minggu)
@@ -1060,6 +1095,10 @@ class DashboardController extends Controller
             
             if ($weH < $wsH || ($weH === $wsH && $weM < $wsM)) {
                 $workEndM->addDay();
+            }
+            
+            if ($otSec > 0) {
+                $workEndM->addSeconds($otSec);
             }
             
             $effectiveStart = $shiftStart->greaterThan($workStartM) ? $shiftStart->copy() : $workStartM;
@@ -1163,7 +1202,9 @@ class DashboardController extends Controller
         string $status,
         ?string $problemType,
         $problemTimestamp,
-        ?MachineRuntimeState $state
+        ?MachineRuntimeState $state,
+        bool $otEnabled = false,
+        ?string $otDurationType = null
     ): array
     {
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
@@ -1332,7 +1373,7 @@ class DashboardController extends Controller
         
         return [
             'runtime_seconds' => $runtimeSeconds,
-            'running_hour_seconds' => $this->computeRunningHourSeconds($now, $shiftStart, $shift),
+            'running_hour_seconds' => $this->computeRunningHourSeconds($now, $shiftStart, $shift, $otEnabled, $otDurationType),
             'state' => $state, // Return state untuk di-save secara batch
         ];
     }
@@ -1350,7 +1391,9 @@ class DashboardController extends Controller
         string $shiftKey,
         string $status,
         ?string $problemType,
-        ?Carbon $problemTimestamp
+        ?Carbon $problemTimestamp,
+        bool $otEnabled = false,
+        ?string $otDurationType = null
     ): array
     {
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
@@ -1457,7 +1500,7 @@ class DashboardController extends Controller
         
         return [
             'runtime_seconds' => $runtimeSeconds,
-            'running_hour_seconds' => $this->computeRunningHourSeconds($now, $shiftStart, $shift),
+            'running_hour_seconds' => $this->computeRunningHourSeconds($now, $shiftStart, $shift, $otEnabled, $otDurationType),
         ];
     }
 

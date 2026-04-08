@@ -13,6 +13,7 @@ use App\Models\OeeRecord;
 use App\Models\OeeRecordHourly;
 use App\Models\BreakSchedule;
 use App\Models\MachineSchedule;
+use App\Support\RunningHourOtExtension;
 use Carbon\Carbon;
 
 class AnalyticsController extends Controller
@@ -450,7 +451,14 @@ class AnalyticsController extends Controller
         $endApp = $endUtc->copy()->setTimezone($appTimezone);
 
         $qty = $this->getLatestMachineQuantityInWindow($address, $startUtc, $endUtc, $appTimezone);
-        $rh = $this->computeRunningHourSecondsForSnapshot($endApp, $startApp, $shift, $appTimezone);
+        $rh = $this->computeRunningHourSecondsForSnapshot(
+            $endApp,
+            $startApp,
+            $shift,
+            $appTimezone,
+            (bool) ($machine->ot_enabled ?? false),
+            $machine->ot_duration_type ?? null
+        );
         $rt = $rh;
 
         $totalProduct = max(0, $qty) * $cavity;
@@ -485,7 +493,8 @@ class AnalyticsController extends Controller
 
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
         $address = trim($request->machine_address);
-        $otEnabled = $this->getOtEnabledForMachine($address);
+        $otSettings = $this->getOtSettingsForMachine($address);
+        $otEnabled = $otSettings['enabled'];
         $cavity = $this->getCavityForMachine($address);
 
         [$startUtc, $endUtc] = $this->resolveShiftWindow(
@@ -507,13 +516,15 @@ class AnalyticsController extends Controller
         // Ambil cycle time sekali saja untuk mesin ini
         $cycleTime = $this->getCycleTimeForMachine($address);
 
-        $data = $rows->map(function ($row) use ($startApp, $request, $appTimezone, $cycleTime, $cavity) {
+        $data = $rows->map(function ($row) use ($startApp, $request, $appTimezone, $cycleTime, $cavity, $otSettings) {
             $snapshotAtApp = $row->snapshot_at->copy()->setTimezone($appTimezone);
             $runningSeconds = $this->computeRunningHourSecondsForSnapshot(
                 $snapshotAtApp,
                 $startApp,
                 $request->shift,
-                $appTimezone
+                $appTimezone,
+                $otSettings['enabled'],
+                $otSettings['duration_type']
             );
 
             $idealQty = 0;
@@ -597,12 +608,19 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Ambil status ot_enabled untuk mesin dari inspection_tables berdasarkan address.
+     * @return array{enabled: bool, duration_type: ?string}
      */
-    private function getOtEnabledForMachine(string $address): bool
+    private function getOtSettingsForMachine(string $address): array
     {
-        $table = InspectionTable::where('address', $address)->first();
-        return $table ? (bool) ($table->ot_enabled ?? false) : false;
+        $table = InspectionTable::where('address', trim($address))->first();
+        if (!$table) {
+            return ['enabled' => false, 'duration_type' => null];
+        }
+
+        return [
+            'enabled' => (bool) ($table->ot_enabled ?? false),
+            'duration_type' => $table->ot_duration_type,
+        ];
     }
 
     /**
@@ -743,7 +761,9 @@ class AnalyticsController extends Controller
         Carbon $snapshotAtApp,
         Carbon $shiftStartApp,
         string $shift,
-        string $appTimezone
+        string $appTimezone,
+        bool $otEnabled = false,
+        ?string $otDurationType = null
     ): int {
         // Jika snapshot sebelum awal shift, tidak ada running hour.
         if ($snapshotAtApp->lt($shiftStartApp)) {
@@ -751,7 +771,8 @@ class AnalyticsController extends Controller
         }
 
         $elapsed = max(0, $shiftStartApp->diffInSeconds($snapshotAtApp));
-        $maxSeconds = 9 * 3600;
+        $otSec = RunningHourOtExtension::extraSeconds($otEnabled, $otDurationType, $shift);
+        $maxSeconds = 9 * 3600 + $otSec;
 
         // Ambil jadwal kerja & istirahat untuk hari & shift ini
         $dayOfWeek = $shiftStartApp->isoWeekday(); // 1 (Senin) - 7 (Minggu)
@@ -780,6 +801,10 @@ class AnalyticsController extends Controller
         // Jika jam akhir < jam awal, berarti nyebrang hari
         if ($weH < $wsH || ($weH === $wsH && $weM < $wsM)) {
             $workEndM->addDay();
+        }
+
+        if ($otSec > 0) {
+            $workEndM->addSeconds($otSec);
         }
 
         $effectiveStart = $shiftStartApp->greaterThan($workStartM) ? $shiftStartApp->copy() : $workStartM;
