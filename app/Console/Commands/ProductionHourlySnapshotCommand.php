@@ -25,6 +25,10 @@ class ProductionHourlySnapshotCommand extends Command
 
         $inserted = 0;
         foreach ($machineNames as $machineName) {
+            $machineName = trim((string) $machineName);
+            if ($machineName === '') {
+                continue;
+            }
             $latest = ProductionData::query()
                 ->where('machine_name', $machineName)
                 ->orderBy('timestamp', 'desc')
@@ -36,7 +40,7 @@ class ProductionHourlySnapshotCommand extends Command
 
             ProductionDataHourly::create([
                 'snapshot_at' => $snapshotAt,
-                'machine_name' => $latest->machine_name,
+                'machine_name' => trim((string) $latest->machine_name),
                 'line_name' => $latest->line_name ?? null,
                 'quantity' => (int) $latest->quantity,
             ]);

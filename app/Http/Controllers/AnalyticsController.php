@@ -493,6 +493,7 @@ class AnalyticsController extends Controller
 
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
         $address = trim($request->machine_address);
+        $addressLower = strtolower($address);
         $otSettings = $this->getOtSettingsForMachine($address);
         $otEnabled = $otSettings['enabled'];
         $cavity = $this->getCavityForMachine($address);
@@ -507,8 +508,11 @@ class AnalyticsController extends Controller
         $startStr = $startApp->format('Y-m-d H:i:s');
         $endStr = $endApp->format('Y-m-d H:i:s');
 
+        // IMPORTANT:
+        // machine_name di production_data / production_data_hourly di lapangan kadang punya whitespace / case beda.
+        // Gunakan TRIM+LOWER agar hasil konsisten (tidak "kadang OT muncul, kadang hilang").
         $rows = ProductionDataHourly::query()
-            ->where('machine_name', $address)
+            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
             ->whereBetween('snapshot_at', [$startStr, $endStr])
             ->orderBy('snapshot_at', 'asc')
             ->get();
@@ -612,7 +616,12 @@ class AnalyticsController extends Controller
      */
     private function getOtSettingsForMachine(string $address): array
     {
-        $table = InspectionTable::where('address', trim($address))->first();
+        $trimmed = trim($address);
+        $lower = strtolower($trimmed);
+
+        $table = InspectionTable::query()
+            ->whereRaw('LOWER(TRIM(address)) = ?', [$lower])
+            ->first();
         if (!$table) {
             return ['enabled' => false, 'duration_type' => null];
         }
@@ -636,7 +645,9 @@ class AnalyticsController extends Controller
             return $this->cycleTimeCache[$key];
         }
 
-        $table = InspectionTable::where('address', $key)->first();
+        $table = InspectionTable::query()
+            ->whereRaw('LOWER(TRIM(address)) = ?', [strtolower($key)])
+            ->first();
         $cycle = $table && $table->cycle_time ? (int) $table->cycle_time : 0;
         $this->cycleTimeCache[$key] = $cycle;
         return $cycle;
@@ -656,7 +667,9 @@ class AnalyticsController extends Controller
             return $this->cavityCache[$key];
         }
 
-        $table = InspectionTable::where('address', $key)->first();
+        $table = InspectionTable::query()
+            ->whereRaw('LOWER(TRIM(address)) = ?', [strtolower($key)])
+            ->first();
         $cavity = 1;
         if ($table && $table->cavity !== null) {
             $cavityValue = (int) $table->cavity;
