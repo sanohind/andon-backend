@@ -494,8 +494,12 @@ class AnalyticsController extends Controller
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
         $address = trim($request->machine_address);
         $addressLower = strtolower($address);
-        $otSettings = $this->getOtSettingsForMachine($address);
-        $otEnabled = $otSettings['enabled'];
+        $otSettingsForDay = $this->getOtSettingsForMachineForScheduleDay(
+            $address,
+            $request->date,
+            $request->shift
+        );
+        $otEnabled = $otSettingsForDay['enabled'];
         $cavity = $this->getCavityForMachine($address);
 
         [$startUtc, $endUtc] = $this->resolveShiftWindow(
@@ -520,15 +524,15 @@ class AnalyticsController extends Controller
         // Ambil cycle time sekali saja untuk mesin ini
         $cycleTime = $this->getCycleTimeForMachine($address);
 
-        $data = $rows->map(function ($row) use ($startApp, $request, $appTimezone, $cycleTime, $cavity, $otSettings) {
+        $data = $rows->map(function ($row) use ($startApp, $request, $appTimezone, $cycleTime, $cavity, $otSettingsForDay) {
             $snapshotAtApp = $row->snapshot_at->copy()->setTimezone($appTimezone);
             $runningSeconds = $this->computeRunningHourSecondsForSnapshot(
                 $snapshotAtApp,
                 $startApp,
                 $request->shift,
                 $appTimezone,
-                $otSettings['enabled'],
-                $otSettings['duration_type']
+                $otSettingsForDay['enabled'],
+                $otSettingsForDay['duration_type']
             );
 
             $idealQty = 0;
@@ -630,6 +634,67 @@ class AnalyticsController extends Controller
             'enabled' => (bool) ($table->ot_enabled ?? false),
             'duration_type' => $table->ot_duration_type,
         ];
+    }
+
+    /**
+     * OT untuk tanggal & shift tertentu dari jadwal harian (machine_schedules).
+     * Penting untuk chart quantity per jam historis: jangan pakai hanya flag OT di InspectionTable
+     * (kondisi hari ini), supaya ideal Qty dan pemisahan OT tetap benar untuk tanggal lampau.
+     *
+     * @return array{enabled: bool, duration_type: ?string}
+     */
+    private function getOtSettingsForMachineForScheduleDay(string $address, string $dateYmd, string $shift): array
+    {
+        $lower = strtolower(trim($address));
+        $fromTable = $this->getOtSettingsForMachine($address);
+
+        $schedule = MachineSchedule::query()
+            ->whereDate('schedule_date', $dateYmd)
+            ->where('shift', $shift)
+            ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$lower])
+            ->first();
+
+        if (!$schedule) {
+            return $fromTable;
+        }
+
+        $rawEnabled = $schedule->getAttributes()['ot_enabled'] ?? null;
+        if ($rawEnabled === null) {
+            return $fromTable;
+        }
+
+        $dayOtEnabled = $this->normalizeBooleanish($rawEnabled);
+        if (!$dayOtEnabled) {
+            return ['enabled' => false, 'duration_type' => null];
+        }
+
+        $duration = $schedule->ot_duration_type;
+        if ($duration === null || $duration === '') {
+            $duration = $fromTable['duration_type'];
+        }
+
+        return [
+            'enabled' => true,
+            'duration_type' => $duration,
+        ];
+    }
+
+    private function normalizeBooleanish(mixed $value): bool
+    {
+        if ($value === null) {
+            return false;
+        }
+        if (is_bool($value)) {
+            return $value;
+        }
+        if (is_int($value) || is_float($value)) {
+            return ((int) $value) !== 0;
+        }
+        if (is_string($value)) {
+            return filter_var($value, FILTER_VALIDATE_BOOLEAN);
+        }
+
+        return false;
     }
 
     /**
