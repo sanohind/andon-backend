@@ -140,6 +140,7 @@ Route::put('/oee-settings', [OeeSettingController::class, 'update']);
 // Machine schedules (target, cavity, OT per date per machine)
 Route::get('/machine-schedules', [MachineScheduleController::class, 'index']);
 Route::post('/machine-schedules', [MachineScheduleController::class, 'store']);
+Route::post('/machine-schedules/week', [MachineScheduleController::class, 'storeWeek']);
 Route::put('/machine-schedules/{id}', [MachineScheduleController::class, 'update']);
 Route::delete('/machine-schedules/{id}', [MachineScheduleController::class, 'destroy']);
 

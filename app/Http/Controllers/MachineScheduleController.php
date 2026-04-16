@@ -77,6 +77,18 @@ class MachineScheduleController extends Controller
             $query->where('status', strtolower($request->status));
         }
 
+        // New explicit filters (preferred by UI)
+        if ($request->filled('schedule_date')) {
+            $query->whereDate('schedule_date', $request->schedule_date);
+        }
+        if ($request->filled('shift') && in_array(strtolower($request->shift), ['pagi', 'malam'])) {
+            $query->where('shift', strtolower($request->shift));
+        }
+        if ($request->filled('machine_address')) {
+            $query->where('machine_address', $request->machine_address);
+        }
+
+        // Backward-compatible search (legacy UI)
         if ($request->filled('search')) {
             $s = $request->search;
             $query->where(function ($q) use ($s) {
@@ -165,10 +177,92 @@ class MachineScheduleController extends Controller
             $validated['ot_duration_type'] = null;
             $validated['target_ot'] = null;
         }
+        if ($validated['ot_enabled']) {
+            $bad = $this->validateScheduleOtDurationForShift($validated['shift'], $validated['ot_duration_type'] ?? null);
+            if ($bad) {
+                return $bad;
+            }
+        }
         $validated['status'] = $this->scheduleStatusForDate($validated['schedule_date']);
 
         $schedule = MachineSchedule::create($validated);
         return response()->json(['success' => true, 'data' => $schedule], 201);
+    }
+
+    /**
+     * POST create schedule for 1 week (7 days) ahead from start_date.
+     * Constraints: 1 machine, 1 target quantity, OT always disabled.
+     */
+    public function storeWeek(Request $request)
+    {
+        if ($this->blockManagementWrite($request)) {
+            return $this->blockManagementWrite($request);
+        }
+        $ctx = $this->getUserContextFromToken($request);
+        $role = $ctx['role'] ?? null;
+        if (!in_array($role, ['admin', 'leader'])) {
+            return response()->json(['success' => false, 'message' => 'Akses Ditolak'], 403);
+        }
+
+        $validated = $request->validate([
+            'start_date' => 'required|date',
+            'machine_address' => 'required|string|max:20',
+            'shift' => 'nullable|string|in:pagi,malam',
+            'target_quantity' => 'required|integer|min:0',
+        ]);
+
+        if ($role === 'leader') {
+            $lineName = $ctx['line_name'] ?? null;
+            $machine = InspectionTable::where('address', $validated['machine_address'])->first();
+            if (!$lineName || !$machine || (string) $machine->line_name !== (string) $lineName) {
+                return response()->json(['success' => false, 'message' => 'Akses Ditolak'], 403);
+            }
+        }
+
+        $start = \Carbon\Carbon::parse($validated['start_date'])->startOfDay();
+        $shift = $validated['shift'] ?? 'pagi';
+        $createdOrUpdated = [];
+        for ($i = 0; $i < 7; $i++) {
+            $date = $start->copy()->addDays($i);
+            $payload = [
+                'schedule_date' => $date->format('Y-m-d'),
+                'machine_address' => $validated['machine_address'],
+                'shift' => $shift,
+                'target_quantity' => (int) $validated['target_quantity'],
+                'ot_enabled' => false,
+                'ot_duration_type' => null,
+                'target_ot' => null,
+                'status' => $this->scheduleStatusForDate($date),
+            ];
+
+            $row = MachineSchedule::updateOrCreate(
+                [
+                    'schedule_date' => $payload['schedule_date'],
+                    'machine_address' => $payload['machine_address'],
+                    'shift' => $payload['shift'],
+                ],
+                $payload
+            );
+            $createdOrUpdated[] = $row;
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Schedule 1 minggu berhasil dibuat.',
+            'data' => collect($createdOrUpdated)->map(function ($row) {
+                return [
+                    'id' => $row->id,
+                    'schedule_date' => $row->schedule_date instanceof \Carbon\Carbon ? $row->schedule_date->format('Y-m-d') : (string) $row->schedule_date,
+                    'machine_address' => $row->machine_address,
+                    'shift' => $row->shift ?? 'pagi',
+                    'target_quantity' => $row->target_quantity,
+                    'ot_enabled' => (bool) $row->ot_enabled,
+                    'ot_duration_type' => $row->ot_duration_type,
+                    'target_ot' => $row->target_ot,
+                    'status' => strtoupper($row->status ?? 'open'),
+                ];
+            })->values(),
+        ], 201);
     }
 
     /**
@@ -224,8 +318,52 @@ class MachineScheduleController extends Controller
             $validated['status'] = $this->scheduleStatusForDate($validated['schedule_date']);
         }
 
+        $mergedShift = strtolower((string) ($validated['shift'] ?? $schedule->shift ?? 'pagi'));
+        if (!in_array($mergedShift, ['pagi', 'malam'], true)) {
+            $mergedShift = 'pagi';
+        }
+        $mergedOtEnabled = array_key_exists('ot_enabled', $validated)
+            ? filter_var($validated['ot_enabled'], FILTER_VALIDATE_BOOLEAN)
+            : filter_var($schedule->ot_enabled ?? false, FILTER_VALIDATE_BOOLEAN);
+        $mergedOtDuration = array_key_exists('ot_duration_type', $validated)
+            ? $validated['ot_duration_type']
+            : $schedule->ot_duration_type;
+        if (isset($validated['ot_enabled']) && !$validated['ot_enabled']) {
+            $mergedOtDuration = null;
+        }
+        if ($mergedOtEnabled) {
+            $bad = $this->validateScheduleOtDurationForShift($mergedShift, $mergedOtDuration);
+            if ($bad) {
+                return $bad;
+            }
+        }
+
         $schedule->update($validated);
         return response()->json(['success' => true, 'data' => $schedule]);
+    }
+
+    /**
+     * Durasi OT harus selaras dengan shift: pagi -> 2h_pagi | 3.5h_pagi, malam -> 2h_malam.
+     */
+    private function validateScheduleOtDurationForShift(string $shift, ?string $otDurationType): ?\Illuminate\Http\JsonResponse
+    {
+        $shift = strtolower($shift) === 'malam' ? 'malam' : 'pagi';
+        $allowed = $shift === 'malam' ? ['2h_malam'] : ['2h_pagi', '3.5h_pagi'];
+        $dur = $otDurationType !== null ? trim((string) $otDurationType) : '';
+        if ($dur === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Pilih durasi OT yang sesuai shift (shift pagi: 2 jam / 3,5 jam; shift malam: 2 jam).',
+            ], 422);
+        }
+        if (!in_array($dur, $allowed, true)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Durasi OT tidak sesuai shift. Shift pagi: 2 jam atau 3,5 jam. Shift malam: 2 jam.',
+            ], 422);
+        }
+
+        return null;
     }
 
     /**
