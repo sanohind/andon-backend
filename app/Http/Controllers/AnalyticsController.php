@@ -635,16 +635,33 @@ class AnalyticsController extends Controller
             $daysInMonth = $monthStart->daysInMonth;
             $monthEnd = $monthStart->copy()->endOfMonth();
             $dailyMap = $this->getProductionDataShiftQuantityMap($address, $shift, $monthStart, $monthEnd, $appTimezone);
+            $addressLower = strtolower($address);
+            $scheduleRows = MachineSchedule::query()
+                ->whereDate('schedule_date', '>=', $monthStart->format('Y-m-d'))
+                ->whereDate('schedule_date', '<=', $monthEnd->format('Y-m-d'))
+                ->where('shift', $shift)
+                ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
+                ->get(['schedule_date', 'target_quantity', 'target_ot', 'ot_enabled']);
+            $scheduleMap = [];
+            foreach ($scheduleRows as $s) {
+                $dateStr = $s->schedule_date instanceof Carbon
+                    ? $s->schedule_date->format('Y-m-d')
+                    : (string) $s->schedule_date;
+                $targetReg = max(0, (int) ($s->target_quantity ?? 0));
+                $targetOt = ((bool) ($s->ot_enabled ?? false)) ? max(0, (int) ($s->target_ot ?? 0)) : 0;
+                $scheduleMap[$dateStr] = $targetReg + $targetOt;
+            }
             $points = [];
 
             for ($day = 1; $day <= $daysInMonth; $day++) {
                 $date = $monthStart->copy()->day($day)->format('Y-m-d');
                 $qty = ((int) ($dailyMap[$date] ?? 0)) * $cavity;
+                $idealQty = ((int) ($scheduleMap[$date] ?? 0)) * $cavity;
                 $points[] = [
                     'label' => str_pad((string) $day, 2, '0', STR_PAD_LEFT),
                     'snapshot_at' => $date,
                     'quantity' => (int) $qty,
-                    'ideal_quantity' => null,
+                    'ideal_quantity' => (int) $idealQty,
                 ];
             }
 
