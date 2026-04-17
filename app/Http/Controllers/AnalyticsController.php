@@ -633,12 +633,13 @@ class AnalyticsController extends Controller
         if ($period === 'monthly') {
             $monthStart = Carbon::parse($request->month . '-01', $appTimezone)->startOfMonth();
             $daysInMonth = $monthStart->daysInMonth;
+            $monthEnd = $monthStart->copy()->endOfMonth();
+            $dailyMap = $this->getProductionDataShiftQuantityMap($address, $shift, $monthStart, $monthEnd, $appTimezone);
             $points = [];
 
             for ($day = 1; $day <= $daysInMonth; $day++) {
                 $date = $monthStart->copy()->day($day)->format('Y-m-d');
-                [$startUtc, $endUtc] = $this->resolveShiftWindow($date, $shift, $appTimezone);
-                $qty = $this->getLatestMachineQuantityInWindow($address, $startUtc, $endUtc, $appTimezone) * $cavity;
+                $qty = ((int) ($dailyMap[$date] ?? 0)) * $cavity;
                 $points[] = [
                     'label' => str_pad((string) $day, 2, '0', STR_PAD_LEFT),
                     'snapshot_at' => $date,
@@ -657,22 +658,24 @@ class AnalyticsController extends Controller
         }
 
         $yearInt = (int) $request->year;
+        $yearStart = Carbon::create($yearInt, 1, 1, 0, 0, 0, $appTimezone)->startOfDay();
+        $yearEnd = Carbon::create($yearInt, 12, 31, 23, 59, 59, $appTimezone)->endOfDay();
+        $dailyMap = $this->getProductionDataShiftQuantityMap($address, $shift, $yearStart, $yearEnd, $appTimezone);
+        $monthlyTotals = array_fill(1, 12, 0);
+        foreach ($dailyMap as $dateStr => $dayQty) {
+            $m = (int) Carbon::parse($dateStr, $appTimezone)->month;
+            if ($m >= 1 && $m <= 12) {
+                $monthlyTotals[$m] += ((int) $dayQty) * $cavity;
+            }
+        }
+
         $points = [];
         for ($month = 1; $month <= 12; $month++) {
             $monthStart = Carbon::create($yearInt, $month, 1, 0, 0, 0, $appTimezone)->startOfMonth();
-            $daysInMonth = $monthStart->daysInMonth;
-            $monthTotal = 0;
-
-            for ($day = 1; $day <= $daysInMonth; $day++) {
-                $date = $monthStart->copy()->day($day)->format('Y-m-d');
-                [$startUtc, $endUtc] = $this->resolveShiftWindow($date, $shift, $appTimezone);
-                $monthTotal += $this->getLatestMachineQuantityInWindow($address, $startUtc, $endUtc, $appTimezone) * $cavity;
-            }
-
             $points[] = [
                 'label' => $monthStart->translatedFormat('M'),
                 'snapshot_at' => $monthStart->format('Y-m'),
-                'quantity' => (int) $monthTotal,
+                'quantity' => (int) ($monthlyTotals[$month] ?? 0),
                 'ideal_quantity' => null,
             ];
         }
@@ -684,6 +687,105 @@ class AnalyticsController extends Controller
             'data' => $points,
             'ot_enabled' => false,
         ]);
+    }
+
+    /**
+     * Ambil qty harian per production-date dari production_data utama untuk shift tertentu.
+     * Nilai yang diambil adalah quantity terbaru pada window shift per tanggal produksi.
+     *
+     * @return array<string,int> map Y-m-d => quantity
+     */
+    private function getProductionDataShiftQuantityMap(
+        string $address,
+        string $shift,
+        Carbon $startDateApp,
+        Carbon $endDateApp,
+        string $appTimezone
+    ): array {
+        $normalizedAddress = trim($address);
+        $lowerAddress = strtolower($normalizedAddress);
+
+        if ($normalizedAddress === '') {
+            return [];
+        }
+
+        if ($shift === 'pagi') {
+            $queryStart = $startDateApp->copy()->setTime(7, 0, 0);
+            $queryEnd = $endDateApp->copy()->setTime(19, 58, 59);
+        } else {
+            $queryStart = $startDateApp->copy()->setTime(20, 0, 0);
+            $queryEnd = $endDateApp->copy()->addDay()->setTime(6, 58, 59);
+        }
+
+        $rows = ProductionData::query()
+            ->whereBetween('timestamp', [$queryStart->format('Y-m-d H:i:s'), $queryEnd->format('Y-m-d H:i:s')])
+            ->where(function ($q) use ($normalizedAddress, $lowerAddress) {
+                $q->where('machine_name', $normalizedAddress)
+                    ->orWhereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress])
+                    ->orWhereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%']);
+            })
+            ->orderBy('timestamp', 'asc')
+            ->get(['timestamp', 'quantity']);
+
+        $latestByDate = [];
+        foreach ($rows as $row) {
+            $ts = $row->timestamp instanceof Carbon
+                ? $row->timestamp->copy()->setTimezone($appTimezone)
+                : Carbon::parse($row->timestamp, $appTimezone);
+            $productionDate = $this->resolveProductionDateForShiftTimestamp($ts, $shift);
+            if ($productionDate === null) {
+                continue;
+            }
+
+            if ($productionDate < $startDateApp->format('Y-m-d') || $productionDate > $endDateApp->format('Y-m-d')) {
+                continue;
+            }
+
+            $currTs = $latestByDate[$productionDate]['ts'] ?? null;
+            if ($currTs === null || $ts->greaterThan($currTs)) {
+                $latestByDate[$productionDate] = [
+                    'ts' => $ts,
+                    'qty' => max(0, (int) $row->quantity),
+                ];
+            }
+        }
+
+        $map = [];
+        foreach ($latestByDate as $date => $v) {
+            $map[$date] = (int) ($v['qty'] ?? 0);
+        }
+        return $map;
+    }
+
+    /**
+     * Tentukan tanggal produksi (Y-m-d) dari timestamp lokal sesuai shift.
+     */
+    private function resolveProductionDateForShiftTimestamp(Carbon $ts, string $shift): ?string
+    {
+        $h = (int) $ts->format('H');
+        $m = (int) $ts->format('i');
+        $s = (int) $ts->format('s');
+        $secOfDay = $h * 3600 + $m * 60 + $s;
+
+        $pagiStart = 7 * 3600;
+        $pagiEnd = 19 * 3600 + 58 * 60 + 59;
+        $malamStart = 20 * 3600;
+        $malamEnd = 6 * 3600 + 58 * 60 + 59;
+
+        if ($shift === 'pagi') {
+            if ($secOfDay >= $pagiStart && $secOfDay <= $pagiEnd) {
+                return $ts->format('Y-m-d');
+            }
+            return null;
+        }
+
+        if ($secOfDay >= $malamStart) {
+            return $ts->format('Y-m-d');
+        }
+        if ($secOfDay <= $malamEnd) {
+            return $ts->copy()->subDay()->format('Y-m-d');
+        }
+        return null;
     }
 
     /**
