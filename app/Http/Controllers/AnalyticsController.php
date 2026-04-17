@@ -556,6 +556,137 @@ class AnalyticsController extends Controller
     }
 
     /**
+     * Drill-down quantity untuk klik bar chart Production Quantity.
+     * - Daily   -> detail per jam
+     * - Monthly -> detail per hari
+     * - Yearly  -> detail per bulan
+     */
+    public function getQuantityDrilldown(Request $request)
+    {
+        $request->validate([
+            'period' => 'required|in:daily,monthly,yearly',
+            'shift' => 'required|in:pagi,malam',
+            'machine_address' => 'required|string',
+            'date' => 'required_if:period,daily|nullable|date_format:Y-m-d',
+            'month' => 'required_if:period,monthly|nullable|date_format:Y-m',
+            'year' => 'required_if:period,yearly|nullable|date_format:Y',
+        ]);
+
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $period = $request->period;
+        $shift = $request->shift;
+        $address = trim($request->machine_address);
+        $cavity = $this->getCavityForMachine($address);
+
+        if ($period === 'daily') {
+            $date = $request->date;
+            $addressLower = strtolower($address);
+            $otSettingsForDay = $this->getOtSettingsForMachineForScheduleDay($address, $date, $shift);
+            $otEnabled = $otSettingsForDay['enabled'];
+
+            [$startUtc, $endUtc] = $this->resolveShiftWindow($date, $shift, $appTimezone);
+            $startApp = $startUtc->copy()->setTimezone($appTimezone);
+            $endApp = $endUtc->copy()->setTimezone($appTimezone);
+
+            $rows = ProductionDataHourly::query()
+                ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
+                ->whereBetween('snapshot_at', [$startApp->format('Y-m-d H:i:s'), $endApp->format('Y-m-d H:i:s')])
+                ->orderBy('snapshot_at', 'asc')
+                ->get();
+
+            $cycleTime = $this->getCycleTimeForMachine($address);
+            $data = $rows->map(function ($row) use ($startApp, $shift, $appTimezone, $cycleTime, $cavity, $otSettingsForDay) {
+                $snapshotAtApp = $row->snapshot_at->copy()->setTimezone($appTimezone);
+                $runningSeconds = $this->computeRunningHourSecondsForSnapshot(
+                    $snapshotAtApp,
+                    $startApp,
+                    $shift,
+                    $appTimezone,
+                    $otSettingsForDay['enabled'],
+                    $otSettingsForDay['duration_type']
+                );
+
+                $idealQty = 0;
+                if ($cycleTime > 0 && $runningSeconds > 0) {
+                    $idealBase = (int) floor($runningSeconds / $cycleTime);
+                    $idealQty = $idealBase * $cavity;
+                }
+
+                $label = $snapshotAtApp->format('Y-m-d H:i');
+                return [
+                    'label' => $label,
+                    'snapshot_at' => $label,
+                    'quantity' => (int) $row->quantity * $cavity,
+                    'ideal_quantity' => $idealQty,
+                ];
+            })->values();
+
+            return response()->json([
+                'success' => true,
+                'period' => $period,
+                'granularity' => 'hourly',
+                'data' => $data,
+                'ot_enabled' => $otEnabled,
+            ]);
+        }
+
+        if ($period === 'monthly') {
+            $monthStart = Carbon::parse($request->month . '-01', $appTimezone)->startOfMonth();
+            $daysInMonth = $monthStart->daysInMonth;
+            $points = [];
+
+            for ($day = 1; $day <= $daysInMonth; $day++) {
+                $date = $monthStart->copy()->day($day)->format('Y-m-d');
+                [$startUtc, $endUtc] = $this->resolveShiftWindow($date, $shift, $appTimezone);
+                $qty = $this->getLatestMachineQuantityInWindow($address, $startUtc, $endUtc, $appTimezone) * $cavity;
+                $points[] = [
+                    'label' => str_pad((string) $day, 2, '0', STR_PAD_LEFT),
+                    'snapshot_at' => $date,
+                    'quantity' => (int) $qty,
+                    'ideal_quantity' => null,
+                ];
+            }
+
+            return response()->json([
+                'success' => true,
+                'period' => $period,
+                'granularity' => 'daily',
+                'data' => $points,
+                'ot_enabled' => false,
+            ]);
+        }
+
+        $yearInt = (int) $request->year;
+        $points = [];
+        for ($month = 1; $month <= 12; $month++) {
+            $monthStart = Carbon::create($yearInt, $month, 1, 0, 0, 0, $appTimezone)->startOfMonth();
+            $daysInMonth = $monthStart->daysInMonth;
+            $monthTotal = 0;
+
+            for ($day = 1; $day <= $daysInMonth; $day++) {
+                $date = $monthStart->copy()->day($day)->format('Y-m-d');
+                [$startUtc, $endUtc] = $this->resolveShiftWindow($date, $shift, $appTimezone);
+                $monthTotal += $this->getLatestMachineQuantityInWindow($address, $startUtc, $endUtc, $appTimezone) * $cavity;
+            }
+
+            $points[] = [
+                'label' => $monthStart->translatedFormat('M'),
+                'snapshot_at' => $monthStart->format('Y-m'),
+                'quantity' => (int) $monthTotal,
+                'ideal_quantity' => null,
+            ];
+        }
+
+        return response()->json([
+            'success' => true,
+            'period' => $period,
+            'granularity' => 'monthly',
+            'data' => $points,
+            'ot_enabled' => false,
+        ]);
+    }
+
+    /**
      * OEE per jam dari oee_records_hourly untuk satu mesin (line + stacked A/P/Q).
      */
     public function getOeeHourly(Request $request)
