@@ -656,7 +656,8 @@ class AnalyticsController extends Controller
             for ($day = 1; $day <= $daysInMonth; $day++) {
                 $date = $monthStart->copy()->day($day)->format('Y-m-d');
                 $qty = ((int) ($dailyMap[$date] ?? 0)) * $cavity;
-                $idealQty = ((int) ($scheduleMap[$date] ?? 0)) * $cavity;
+                // Ideal Qty dari schedule sudah bersifat target per mesin per hari (jangan dikali cavity lagi).
+                $idealQty = (int) ($scheduleMap[$date] ?? 0);
                 $points[] = [
                     'label' => str_pad((string) $day, 2, '0', STR_PAD_LEFT),
                     'snapshot_at' => $date,
