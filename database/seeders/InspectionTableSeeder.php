@@ -15,6 +15,7 @@ class InspectionTableSeeder extends Seeder
         // Sample inspection tables data
         $tables = [
             [
+                'machine_id' => '101-01',
                 'name' => 'Meja Inspect 1',
                 'line_name' => 'Leak Test Inspection',
                 'division' => 'Brazing',
@@ -23,6 +24,7 @@ class InspectionTableSeeder extends Seeder
                 'updated_at' => now(),
             ],
             [
+                'machine_id' => '101-02',
                 'name' => 'Meja Inspect 2',
                 'line_name' => 'Support',
                 'division' => 'Brazing',
@@ -31,6 +33,7 @@ class InspectionTableSeeder extends Seeder
                 'updated_at' => now(),
             ],
             [
+                'machine_id' => '101-03',
                 'name' => 'Meja Inspect 3',
                 'line_name' => 'Hand Bending',
                 'division' => 'Brazing',
@@ -39,6 +42,7 @@ class InspectionTableSeeder extends Seeder
                 'updated_at' => now(),
             ],
             [
+                'machine_id' => '101-04',
                 'name' => 'Meja Inspect 4',
                 'line_name' => 'Welding',
                 'division' => 'Brazing',
@@ -47,6 +51,7 @@ class InspectionTableSeeder extends Seeder
                 'updated_at' => now(),
             ],
             [
+                'machine_id' => '102-01',
                 'name' => 'Meja Inspect 5',
                 'line_name' => 'Cutting',
                 'division' => 'Chassis',
@@ -55,6 +60,7 @@ class InspectionTableSeeder extends Seeder
                 'updated_at' => now(),
             ],
             [
+                'machine_id' => '102-02',
                 'name' => 'Meja Inspect 6',
                 'line_name' => 'Flaring',
                 'division' => 'Chassis',
@@ -63,6 +69,7 @@ class InspectionTableSeeder extends Seeder
                 'updated_at' => now(),
             ],
             [
+                'machine_id' => '102-03',
                 'name' => 'Meja Inspect 7',
                 'line_name' => 'MF/TK',
                 'division' => 'Chassis',
@@ -71,6 +78,7 @@ class InspectionTableSeeder extends Seeder
                 'updated_at' => now(),
             ],
             [
+                'machine_id' => '102-04',
                 'name' => 'Meja Inspect 8',
                 'line_name' => 'LRFD',
                 'division' => 'Chassis',
@@ -79,6 +87,7 @@ class InspectionTableSeeder extends Seeder
                 'updated_at' => now(),
             ],
             [
+                'machine_id' => '103-01',
                 'name' => 'Meja Inspect 9',
                 'line_name' => 'Assy',
                 'division' => 'Chassis',
@@ -87,6 +96,7 @@ class InspectionTableSeeder extends Seeder
                 'updated_at' => now(),
             ],
             [
+                'machine_id' => '103-02',
                 'name' => 'Meja Inspect 10',
                 'line_name' => 'Injection/Extrude',
                 'division' => 'Nylon',
@@ -95,6 +105,7 @@ class InspectionTableSeeder extends Seeder
                 'updated_at' => now(),
             ],
             [
+                'machine_id' => '103-03',
                 'name' => 'Meja Inspect 11',
                 'line_name' => 'Roda Dua',
                 'division' => 'Nylon',
@@ -103,6 +114,7 @@ class InspectionTableSeeder extends Seeder
                 'updated_at' => now(),
             ],
             [
+                'machine_id' => '103-04',
                 'name' => 'Meja Inspect 12',
                 'line_name' => 'Roda Empat',
                 'division' => 'Nylon',

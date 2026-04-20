@@ -42,9 +42,12 @@ class InspectionTableController extends Controller
         }
 
         $validated = $request->validate([
+            'machine_id' => 'required|string|max:100|unique:inspection_tables,machine_id',
             'name' => 'required|string|max:255',
             'line_name' => 'required|string|max:50',
-            'division' => 'required|string|max:50'
+            'division' => 'required|string|max:50',
+        ], [
+            'machine_id.unique' => 'ID Mesin sudah digunakan.',
         ]);
         $validated = $this->normalizeTablePayload($validated);
 
@@ -80,12 +83,13 @@ class InspectionTableController extends Controller
             }
         }
 
-        // Buat meja baru dengan address (machine_id diisi otomatis di model: TEMP-{id})
+        // Buat meja baru dengan address dan machine_id dari input (unik di DB)
         $inspectionTable = InspectionTable::create([
+            'machine_id' => $validated['machine_id'],
             'name' => $validated['name'],
             'line_name' => $validated['line_name'],
             'division' => $validated['division'],
-            'address' => $address
+            'address' => $address,
         ]);
         $inspectionTable->refresh();
 
