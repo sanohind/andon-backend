@@ -6,6 +6,7 @@ use App\Models\InspectionTable;
 use App\Models\ProductionData;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Carbon\Carbon;
 
 class InspectionTableController extends Controller
@@ -107,8 +108,16 @@ class InspectionTableController extends Controller
         }
 
         $validated = $request->validate([
+            'machine_id' => [
+                'required',
+                'string',
+                'max:100',
+                Rule::unique('inspection_tables', 'machine_id')->ignore($inspectionTable->id),
+            ],
             'name' => 'required|string|max:255',
-            'line_name' => 'required|string|max:50'
+            'line_name' => 'required|string|max:50',
+        ], [
+            'machine_id.unique' => 'ID Mesin sudah digunakan.',
         ]);
         $validated = $this->normalizeTablePayload($validated);
 
