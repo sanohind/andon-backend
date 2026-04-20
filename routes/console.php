@@ -9,16 +9,9 @@ Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-// Snapshot quantity dari production_data ke production_data_hourly setiap jam pada menit 00
-Schedule::command('production:hourly-snapshot')
+// Snapshot produksi per jam lalu OEE per jam (satu jadwal; OEE setelah produksi agar quantity konsisten)
+Schedule::command('hourly:production-oee-snapshot')
     ->hourlyAt(0)
-    ->timezone(config('app.timezone', 'Asia/Jakarta'))
-    ->withoutOverlapping()
-    ->runInBackground();
-
-// Snapshot OEE (setelah production snapshot agar quantity konsisten)
-Schedule::command('oee:hourly-snapshot')
-    ->hourlyAt(1)
     ->timezone(config('app.timezone', 'Asia/Jakarta'))
     ->withoutOverlapping()
     ->runInBackground();

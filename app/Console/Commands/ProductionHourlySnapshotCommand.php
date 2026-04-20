@@ -11,7 +11,7 @@ class ProductionHourlySnapshotCommand extends Command
 {
     protected $signature = 'production:hourly-snapshot';
 
-    protected $description = 'Snapshot quantity dari production_data ke production_data_hourly (dijalankan setiap jam pada menit 58)';
+    protected $description = 'Snapshot quantity dari production_data ke production_data_hourly (biasanya tiap jam menit 00)';
 
     public function handle(): int
     {
