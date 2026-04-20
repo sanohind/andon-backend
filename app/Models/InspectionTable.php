@@ -8,7 +8,7 @@ class InspectionTable extends Model
 {
     use HasFactory;
     protected $table = 'inspection_tables';
-	protected $fillable = ['name', 'line_name', 'division', 'address', 'oee', 'target_quantity', 'cycle_time', 'warning_cycle_count', 'problem_cycle_count', 'ot_enabled', 'ot_duration_type', 'target_ot', 'cavity'];
+	protected $fillable = ['machine_id', 'name', 'line_name', 'division', 'address', 'oee', 'target_quantity', 'cycle_time', 'warning_cycle_count', 'problem_cycle_count', 'ot_enabled', 'ot_duration_type', 'target_ot', 'cavity'];
 
     protected $casts = [
         'target_quantity' => 'integer',
@@ -20,6 +20,16 @@ class InspectionTable extends Model
         'target_ot' => 'integer',
         'cavity' => 'integer',
     ];
+
+    protected static function booted(): void
+    {
+        static::created(function (InspectionTable $table) {
+            if (empty($table->machine_id)) {
+                $table->machine_id = 'TEMP-' . $table->id;
+                $table->saveQuietly();
+            }
+        });
+    }
 
     /**
      * Mutator: pastikan ot_enabled selalu disimpan sebagai boolean untuk PostgreSQL.

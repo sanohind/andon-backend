@@ -79,13 +79,14 @@ class InspectionTableController extends Controller
             }
         }
 
-        // Buat meja baru dengan address
+        // Buat meja baru dengan address (machine_id diisi otomatis di model: TEMP-{id})
         $inspectionTable = InspectionTable::create([
             'name' => $validated['name'],
             'line_name' => $validated['line_name'],
             'division' => $validated['division'],
             'address' => $address
         ]);
+        $inspectionTable->refresh();
 
         // Auto-insert ke production_data untuk memulai penghitungan quantity
         ProductionData::create([
