@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Division;
+use App\Models\InspectionTable;
 use App\Models\Line;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -185,6 +186,8 @@ class DivisionLineController extends Controller
         }
 
         $line = Line::findOrFail($id);
+        $oldLineName = $line->name;
+        $oldDivisionId = $line->division_id;
         
         $validated = $request->validate([
             'division_id' => 'required|exists:divisions,id',
@@ -205,13 +208,28 @@ class DivisionLineController extends Controller
         }
 
         try {
-            $line->update($validated);
-            
-            return response()->json([
-                'success' => true,
-                'message' => 'Line updated successfully',
-                'data' => $line->load('division')
-            ]);
+            return DB::transaction(function () use ($line, $validated, $oldLineName, $oldDivisionId) {
+                $line->update($validated);
+
+                // Sinkronkan perubahan ke inspection_tables agar analytics selalu sesuai divisi terbaru.
+                // Source of truth analytics: kolom division + line_name di inspection_tables.
+                $divisionName = Division::find($validated['division_id'])->name ?? null;
+                if ($divisionName) {
+                    $shouldUpdateInspection = ($validated['name'] !== $oldLineName) || ((int) $validated['division_id'] !== (int) $oldDivisionId);
+                    if ($shouldUpdateInspection) {
+                        InspectionTable::where('line_name', $oldLineName)->update([
+                            'line_name' => $validated['name'],
+                            'division' => $divisionName
+                        ]);
+                    }
+                }
+
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Line updated successfully',
+                    'data' => $line->load('division')
+                ]);
+            });
         } catch (\Exception $e) {
             \Log::error('Error updating line: ' . $e->getMessage());
             return response()->json([
