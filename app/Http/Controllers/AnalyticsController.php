@@ -553,23 +553,37 @@ class AnalyticsController extends Controller
         return (int) floor($runningSeconds / $cycleTime) * $cavity;
     }
 
-    private function formatQuantityHourlyIntervalLabel(Carbon $startApp, Carbon $endApp): string
+    /**
+     * Klasifikasi interval (jam awal selang = snapshot sebelumnya) untuk split Reguler vs OT,
+     * selaras dengan frontend analytics.js.
+     */
+    private function classifyQuantityHourlyIntervalBand(string $shift, int $hour): string
     {
-        if ($startApp->toDateString() === $endApp->toDateString()) {
-            return $startApp->format('H:i') . ' - ' . $endApp->format('H:i');
+        if ($shift === 'pagi') {
+            if ($hour <= 15) {
+                return 'regular';
+            }
+            if ($hour >= 16) {
+                return 'ot';
+            }
+
+            return 'regular';
+        }
+        if ($hour >= 5 && $hour <= 6) {
+            return 'ot';
         }
 
-        return $startApp->format('d/m H:i') . ' - ' . $endApp->format('d/m H:i');
+        return 'regular';
     }
 
     /**
-     * Bangun deret per selang waktu: quantity aktual = selisih counter board antar snapshot;
-     * ideal = selisih kapasitas kumulatif (sesuai jadwal running hour) antar titik yang sama.
+     * Bangun deret per titik snapshot: quantity & ideal dalam bentuk kumulatif sejak awal shift
+     * (garis chart menanjak). Selang waktu tetap diisi (period_start/end) untuk klasifikasi Reguler/OT.
      *
      * @param \Illuminate\Database\Eloquent\Collection<int, ProductionDataHourly> $rowsInWindow
      * @return array<int, array<string, mixed>>
      */
-    private function buildQuantityHourlyDeltaSeries(
+    private function buildQuantityHourlyCumulativeSeries(
         $rowsInWindow,
         Carbon $anchorTime,
         int $anchorBoardQty,
@@ -587,6 +601,10 @@ class AnalyticsController extends Controller
         $prevSnap = $anchorTime->copy();
         $prevQty = max(0, $anchorBoardQty);
 
+        $cumTotal = 0;
+        $cumRegular = 0;
+        $cumOt = 0;
+
         foreach ($rowsInWindow as $curr) {
             $currSnap = $curr->snapshot_at->copy()->setTimezone($appTimezone);
 
@@ -596,7 +614,19 @@ class AnalyticsController extends Controller
 
             $qtyDelta = $boardDelta * $cavity;
 
-            $idealEnd = $this->computeCumulativeIdealQuantityForSnapshot(
+            $hour = (int) $prevSnap->format('G');
+            $band = $this->classifyQuantityHourlyIntervalBand($shift, $hour);
+
+            $cumTotal += $qtyDelta;
+            if ($otEnabled) {
+                if ($band === 'ot') {
+                    $cumOt += $qtyDelta;
+                } else {
+                    $cumRegular += $qtyDelta;
+                }
+            }
+
+            $idealCum = $this->computeCumulativeIdealQuantityForSnapshot(
                 $currSnap,
                 $shiftStartApp,
                 $shift,
@@ -606,26 +636,21 @@ class AnalyticsController extends Controller
                 $otEnabled,
                 $otDur
             );
-            $idealStart = $this->computeCumulativeIdealQuantityForSnapshot(
-                $prevSnap,
-                $shiftStartApp,
-                $shift,
-                $appTimezone,
-                $cycleTime,
-                $cavity,
-                $otEnabled,
-                $otDur
-            );
-            $idealDelta = max(0, $idealEnd - $idealStart);
 
-            $out[] = [
+            $row = [
                 'period_start' => $prevSnap->format('Y-m-d H:i'),
                 'period_end' => $currSnap->format('Y-m-d H:i'),
                 'snapshot_at' => $currSnap->format('Y-m-d H:i'),
-                'label' => $this->formatQuantityHourlyIntervalLabel($prevSnap, $currSnap),
-                'quantity' => (int) $qtyDelta,
-                'ideal_quantity' => (int) $idealDelta,
+                'label' => $currSnap->format('d/m H:i'),
+                'quantity' => (int) $cumTotal,
+                'ideal_quantity' => (int) $idealCum,
             ];
+            if ($otEnabled) {
+                $row['quantity_cumulative_regular'] = (int) $cumRegular;
+                $row['quantity_cumulative_ot'] = (int) $cumOt;
+            }
+
+            $out[] = $row;
 
             $prevSnap = $currSnap;
             $prevQty = $cq;
@@ -637,10 +662,8 @@ class AnalyticsController extends Controller
     /**
      * Data quantity per jam dari production_data_hourly untuk satu mesin (grafik line per jam).
      * Query sesuai tanggal dan shift yang dipilih.
-     * Quantity aktual per titik = selisih counter antara snapshot saat ini dengan snapshot sebelumnya
-     * (bukan nilai kumulatif), agar jam pertama shift tidak membawa sisa shift lalu.
-     * Setiap titik punya period_start / period_end (selang waktu yang jelas). Klasifikasi Reguler vs OT
-     * di frontend memakai jam period_start (awal selang).
+     * Quantity & ideal per titik = nilai kumulatif sejak awal shift (garis menanjak).
+     * period_start / period_end tetap diisi (awal–akhir selang antar snapshot) untuk klasifikasi Reguler vs OT.
      * - Pagi: reguler jam ≤15, OT jam ≥16 (sampai akhir window shift).
      * - Malam: OT jam 5–6; selain itu reguler (termasuk jam 7 = bagian akhir shift malam).
      * - Jika ot_enabled=false: satu seri quantity saja (tanpa split OT).
@@ -697,7 +720,7 @@ class AnalyticsController extends Controller
             $anchorBoardQty = 0;
         }
 
-        $data = $this->buildQuantityHourlyDeltaSeries(
+        $data = $this->buildQuantityHourlyCumulativeSeries(
             $rows,
             $anchorTime,
             $anchorBoardQty,
@@ -771,7 +794,7 @@ class AnalyticsController extends Controller
                 $anchorBoardQty = 0;
             }
 
-            $data = $this->buildQuantityHourlyDeltaSeries(
+            $data = $this->buildQuantityHourlyCumulativeSeries(
                 $rows,
                 $anchorTime,
                 $anchorBoardQty,
