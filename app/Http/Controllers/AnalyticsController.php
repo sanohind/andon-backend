@@ -478,8 +478,169 @@ class AnalyticsController extends Controller
     }
 
     /**
+     * Anchor counter sebelum window shift: snapshot hourly terakhir, atau record production_data terakhir
+     * sebelum shift dimulai (agar delta jam pertama shift tidak membawa kumulatif shift sebelumnya).
+     *
+     * @return array{0: ?Carbon, 1: int} waktu anchor (app tz), quantity board
+     */
+    private function resolveQuantityHourlyAnchorBeforeShift(
+        string $normalizedAddress,
+        string $addressLower,
+        string $startStr,
+        string $appTimezone
+    ): array {
+        $hourly = ProductionDataHourly::query()
+            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
+            ->where('snapshot_at', '<', $startStr)
+            ->orderBy('snapshot_at', 'desc')
+            ->first();
+        if ($hourly) {
+            $t = $hourly->snapshot_at instanceof Carbon
+                ? $hourly->snapshot_at->copy()->setTimezone($appTimezone)
+                : Carbon::parse($hourly->snapshot_at, $appTimezone);
+
+            return [$t, max(0, (int) $hourly->quantity)];
+        }
+
+        $pd = ProductionData::query()
+            ->where('timestamp', '<', $startStr)
+            ->where(function ($q) use ($normalizedAddress, $addressLower) {
+                $q->where('machine_name', $normalizedAddress)
+                    ->orWhereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
+                    ->orWhereRaw('LOWER(machine_name) LIKE ?', ['%' . $addressLower . '%']);
+            })
+            ->orderBy('timestamp', 'desc')
+            ->first();
+        if ($pd) {
+            $ts = $pd->timestamp instanceof Carbon
+                ? $pd->timestamp->copy()->setTimezone($appTimezone)
+                : Carbon::parse($pd->timestamp, $appTimezone);
+
+            return [$ts, max(0, (int) $pd->quantity)];
+        }
+
+        return [null, 0];
+    }
+
+    /**
+     * Ideal kumulatif (pieces) sampai snapshot — sama dengan logika chart sebelumnya, untuk dipakai sebagai selisih antar titik.
+     */
+    private function computeCumulativeIdealQuantityForSnapshot(
+        Carbon $snapshotAtApp,
+        Carbon $shiftStartApp,
+        string $shift,
+        string $appTimezone,
+        int $cycleTime,
+        int $cavity,
+        bool $otEnabled,
+        ?string $otDurationType
+    ): int {
+        if ($cycleTime <= 0) {
+            return 0;
+        }
+        $runningSeconds = $this->computeRunningHourSecondsForSnapshot(
+            $snapshotAtApp,
+            $shiftStartApp,
+            $shift,
+            $appTimezone,
+            $otEnabled,
+            $otDurationType
+        );
+        if ($runningSeconds <= 0) {
+            return 0;
+        }
+
+        return (int) floor($runningSeconds / $cycleTime) * $cavity;
+    }
+
+    private function formatQuantityHourlyIntervalLabel(Carbon $startApp, Carbon $endApp): string
+    {
+        if ($startApp->toDateString() === $endApp->toDateString()) {
+            return $startApp->format('H:i') . ' - ' . $endApp->format('H:i');
+        }
+
+        return $startApp->format('d/m H:i') . ' - ' . $endApp->format('d/m H:i');
+    }
+
+    /**
+     * Bangun deret per selang waktu: quantity aktual = selisih counter board antar snapshot;
+     * ideal = selisih kapasitas kumulatif (sesuai jadwal running hour) antar titik yang sama.
+     *
+     * @param \Illuminate\Database\Eloquent\Collection<int, ProductionDataHourly> $rowsInWindow
+     * @return array<int, array<string, mixed>>
+     */
+    private function buildQuantityHourlyDeltaSeries(
+        $rowsInWindow,
+        Carbon $anchorTime,
+        int $anchorBoardQty,
+        Carbon $shiftStartApp,
+        string $shift,
+        string $appTimezone,
+        int $cycleTime,
+        int $cavity,
+        array $otSettingsForDay
+    ): array {
+        $otEnabled = $otSettingsForDay['enabled'];
+        $otDur = $otSettingsForDay['duration_type'] ?? null;
+
+        $out = [];
+        $prevSnap = $anchorTime->copy();
+        $prevQty = max(0, $anchorBoardQty);
+
+        foreach ($rowsInWindow as $curr) {
+            $currSnap = $curr->snapshot_at->copy()->setTimezone($appTimezone);
+
+            $pq = max(0, $prevQty);
+            $cq = max(0, (int) $curr->quantity);
+            $boardDelta = ($cq >= $pq) ? ($cq - $pq) : $cq;
+
+            $qtyDelta = $boardDelta * $cavity;
+
+            $idealEnd = $this->computeCumulativeIdealQuantityForSnapshot(
+                $currSnap,
+                $shiftStartApp,
+                $shift,
+                $appTimezone,
+                $cycleTime,
+                $cavity,
+                $otEnabled,
+                $otDur
+            );
+            $idealStart = $this->computeCumulativeIdealQuantityForSnapshot(
+                $prevSnap,
+                $shiftStartApp,
+                $shift,
+                $appTimezone,
+                $cycleTime,
+                $cavity,
+                $otEnabled,
+                $otDur
+            );
+            $idealDelta = max(0, $idealEnd - $idealStart);
+
+            $out[] = [
+                'period_start' => $prevSnap->format('Y-m-d H:i'),
+                'period_end' => $currSnap->format('Y-m-d H:i'),
+                'snapshot_at' => $currSnap->format('Y-m-d H:i'),
+                'label' => $this->formatQuantityHourlyIntervalLabel($prevSnap, $currSnap),
+                'quantity' => (int) $qtyDelta,
+                'ideal_quantity' => (int) $idealDelta,
+            ];
+
+            $prevSnap = $currSnap;
+            $prevQty = $cq;
+        }
+
+        return $out;
+    }
+
+    /**
      * Data quantity per jam dari production_data_hourly untuk satu mesin (grafik line per jam).
      * Query sesuai tanggal dan shift yang dipilih.
+     * Quantity aktual per titik = selisih counter antara snapshot saat ini dengan snapshot sebelumnya
+     * (bukan nilai kumulatif), agar jam pertama shift tidak membawa sisa shift lalu.
+     * Setiap titik punya period_start / period_end (selang waktu yang jelas). Klasifikasi Reguler vs OT
+     * di frontend memakai jam period_start (awal selang).
      * - Aktual reguler hanya sampai 15:58 (pagi) dan 04:58 (malam); 16:58 dan 05:58 ke atas = OT.
      * - Jika ot_enabled=false: data berakhir di 15:58/04:58, selebihnya tidak ditampilkan.
      */
@@ -494,6 +655,7 @@ class AnalyticsController extends Controller
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
         $address = trim($request->machine_address);
         $addressLower = strtolower($address);
+        $normalizedAddress = $address;
         $otSettingsForDay = $this->getOtSettingsForMachineForScheduleDay(
             $address,
             $request->date,
@@ -521,32 +683,30 @@ class AnalyticsController extends Controller
             ->orderBy('snapshot_at', 'asc')
             ->get();
 
-        // Ambil cycle time sekali saja untuk mesin ini
         $cycleTime = $this->getCycleTimeForMachine($address);
 
-        $data = $rows->map(function ($row) use ($startApp, $request, $appTimezone, $cycleTime, $cavity, $otSettingsForDay) {
-            $snapshotAtApp = $row->snapshot_at->copy()->setTimezone($appTimezone);
-            $runningSeconds = $this->computeRunningHourSecondsForSnapshot(
-                $snapshotAtApp,
-                $startApp,
-                $request->shift,
-                $appTimezone,
-                $otSettingsForDay['enabled'],
-                $otSettingsForDay['duration_type']
-            );
+        [$anchorTime, $anchorBoardQty] = $this->resolveQuantityHourlyAnchorBeforeShift(
+            $normalizedAddress,
+            $addressLower,
+            $startStr,
+            $appTimezone
+        );
+        if ($anchorTime === null) {
+            $anchorTime = $startApp->copy();
+            $anchorBoardQty = 0;
+        }
 
-            $idealQty = 0;
-            if ($cycleTime > 0 && $runningSeconds > 0) {
-                $idealBase = (int) floor($runningSeconds / $cycleTime);
-                $idealQty = $idealBase * $cavity;
-            }
-
-            return [
-                'snapshot_at' => $snapshotAtApp->format('Y-m-d H:i'),
-                'quantity' => (int) $row->quantity * $cavity,
-                'ideal_quantity' => $idealQty,
-            ];
-        })->values();
+        $data = $this->buildQuantityHourlyDeltaSeries(
+            $rows,
+            $anchorTime,
+            $anchorBoardQty,
+            $startApp,
+            $request->shift,
+            $appTimezone,
+            $cycleTime,
+            $cavity,
+            $otSettingsForDay
+        );
 
         return response()->json([
             'success' => true,
@@ -581,45 +741,46 @@ class AnalyticsController extends Controller
         if ($period === 'daily') {
             $date = $request->date;
             $addressLower = strtolower($address);
+            $normalizedAddress = trim($address);
             $otSettingsForDay = $this->getOtSettingsForMachineForScheduleDay($address, $date, $shift);
             $otEnabled = $otSettingsForDay['enabled'];
 
             [$startUtc, $endUtc] = $this->resolveShiftWindow($date, $shift, $appTimezone);
             $startApp = $startUtc->copy()->setTimezone($appTimezone);
             $endApp = $endUtc->copy()->setTimezone($appTimezone);
+            $startStr = $startApp->format('Y-m-d H:i:s');
+            $endStr = $endApp->format('Y-m-d H:i:s');
 
             $rows = ProductionDataHourly::query()
                 ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
-                ->whereBetween('snapshot_at', [$startApp->format('Y-m-d H:i:s'), $endApp->format('Y-m-d H:i:s')])
+                ->whereBetween('snapshot_at', [$startStr, $endStr])
                 ->orderBy('snapshot_at', 'asc')
                 ->get();
 
             $cycleTime = $this->getCycleTimeForMachine($address);
-            $data = $rows->map(function ($row) use ($startApp, $shift, $appTimezone, $cycleTime, $cavity, $otSettingsForDay) {
-                $snapshotAtApp = $row->snapshot_at->copy()->setTimezone($appTimezone);
-                $runningSeconds = $this->computeRunningHourSecondsForSnapshot(
-                    $snapshotAtApp,
-                    $startApp,
-                    $shift,
-                    $appTimezone,
-                    $otSettingsForDay['enabled'],
-                    $otSettingsForDay['duration_type']
-                );
 
-                $idealQty = 0;
-                if ($cycleTime > 0 && $runningSeconds > 0) {
-                    $idealBase = (int) floor($runningSeconds / $cycleTime);
-                    $idealQty = $idealBase * $cavity;
-                }
+            [$anchorTime, $anchorBoardQty] = $this->resolveQuantityHourlyAnchorBeforeShift(
+                $normalizedAddress,
+                $addressLower,
+                $startStr,
+                $appTimezone
+            );
+            if ($anchorTime === null) {
+                $anchorTime = $startApp->copy();
+                $anchorBoardQty = 0;
+            }
 
-                $label = $snapshotAtApp->format('Y-m-d H:i');
-                return [
-                    'label' => $label,
-                    'snapshot_at' => $label,
-                    'quantity' => (int) $row->quantity * $cavity,
-                    'ideal_quantity' => $idealQty,
-                ];
-            })->values();
+            $data = $this->buildQuantityHourlyDeltaSeries(
+                $rows,
+                $anchorTime,
+                $anchorBoardQty,
+                $startApp,
+                $shift,
+                $appTimezone,
+                $cycleTime,
+                $cavity,
+                $otSettingsForDay
+            );
 
             return response()->json([
                 'success' => true,
