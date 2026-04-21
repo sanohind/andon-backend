@@ -150,7 +150,7 @@ class AnalyticsController extends Controller
     /**
      * Get target vs actual quantity per mesin/meja untuk chart perbandingan.
      * Mendukung: tanggal spesifik, bulanan (akumulasi), tahuanan (akumulasi).
-     * Shift pagi: 07:00 - 19:59 | Shift malam: 21:00 - 06:59 (hari berikutnya)
+     * Window shift (sama dengan resolveShiftWindow): pagi 07:01–20:00, malam 20:01–07:00 (lokal).
      */
     public function getLineQuantityComparison(Request $request)
     {
@@ -641,8 +641,9 @@ class AnalyticsController extends Controller
      * (bukan nilai kumulatif), agar jam pertama shift tidak membawa sisa shift lalu.
      * Setiap titik punya period_start / period_end (selang waktu yang jelas). Klasifikasi Reguler vs OT
      * di frontend memakai jam period_start (awal selang).
-     * - Aktual reguler hanya sampai 15:58 (pagi) dan 04:58 (malam); 16:58 dan 05:58 ke atas = OT.
-     * - Jika ot_enabled=false: data berakhir di 15:58/04:58, selebihnya tidak ditampilkan.
+     * - Pagi: reguler jam ≤15, OT jam ≥16 (sampai akhir window shift).
+     * - Malam: OT jam 5–6; selain itu reguler (termasuk jam 7 = bagian akhir shift malam).
+     * - Jika ot_enabled=false: satu seri quantity saja (tanpa split OT).
      */
     public function getQuantityHourly(Request $request)
     {
@@ -889,11 +890,11 @@ class AnalyticsController extends Controller
         }
 
         if ($shift === 'pagi') {
-            $queryStart = $startDateApp->copy()->setTime(7, 0, 0);
-            $queryEnd = $endDateApp->copy()->setTime(19, 58, 59);
+            $queryStart = $startDateApp->copy()->setTime(7, 1, 0);
+            $queryEnd = $endDateApp->copy()->setTime(20, 0, 59);
         } else {
-            $queryStart = $startDateApp->copy()->setTime(20, 0, 0);
-            $queryEnd = $endDateApp->copy()->addDay()->setTime(6, 58, 59);
+            $queryStart = $startDateApp->copy()->setTime(20, 1, 0);
+            $queryEnd = $endDateApp->copy()->addDay()->setTime(7, 0, 59);
         }
 
         $rows = ProductionData::query()
@@ -946,10 +947,12 @@ class AnalyticsController extends Controller
         $s = (int) $ts->format('s');
         $secOfDay = $h * 3600 + $m * 60 + $s;
 
-        $pagiStart = 7 * 3600;
-        $pagiEnd = 19 * 3600 + 58 * 60 + 59;
-        $malamStart = 20 * 3600;
-        $malamEnd = 6 * 3600 + 58 * 60 + 59;
+        // Pagi: mulai setelah reset malam (07:01) s.d. akhir jam 20:00 (termasuk 20:00:xx).
+        $pagiStart = 7 * 3600 + 1 * 60;
+        $pagiEnd = 20 * 3600 + 59;
+        // Malam: mulai setelah reset pagi (20:01) s.d. akhir jam 07:00 hari berikutnya (termasuk 07:00:xx).
+        $malamStart = 20 * 3600 + 1 * 60;
+        $malamEnd = 7 * 3600 + 59;
 
         if ($shift === 'pagi') {
             if ($secOfDay >= $pagiStart && $secOfDay <= $pagiEnd) {
@@ -1217,9 +1220,9 @@ class AnalyticsController extends Controller
 
     /**
      * Menentukan window UTC untuk shift terpilih.
-     * Batas akhir 1 detik sebelum reset (06:59 / 19:59) agar data yang diambil bukan nilai setelah reset (0).
-     * Shift pagi: tanggal 07:00 - tanggal 19:59:59
-     * Shift malam: tanggal 21:00 - tanggal+1 06:58:59
+     * Counter di lapangan di-reset sekitar 07:01 (akhir shift malam) dan 20:01 (akhir shift pagi).
+     * - Pagi: snapshot dari 07:01:00 s.d. 20:00:59 hari D (jam 20:00 masih shift pagi; 20:01+ = shift malam).
+     * - Malam: snapshot dari 20:01:00 hari D s.d. 07:00:59 hari D+1 (jam 07:00 masih shift malam; 07:01+ = shift pagi).
      *
      * @return array{0: Carbon, 1: Carbon}
      */
@@ -1228,13 +1231,11 @@ class AnalyticsController extends Controller
         $date = Carbon::parse($dateStr, $appTimezone);
 
         if ($shift === 'pagi') {
-            // Shift Pagi: 07:00:00 - 19:59:59 (pembacaan chart Production Quantity & quantity hourly)
-            $startApp = $date->copy()->setTime(7, 0, 0);
-            $endApp = $date->copy()->setTime(19, 58, 59);
+            $startApp = $date->copy()->setTime(7, 1, 0);
+            $endApp = $date->copy()->setTime(20, 0, 59);
         } else {
-            // Shift Malam: 21:00 hari ini - 06:58:59 hari berikutnya (sebelum reset jam 07:00)
-            $startApp = $date->copy()->setTime(20, 0, 0);
-            $endApp = $date->copy()->addDay()->setTime(6, 58, 59);
+            $startApp = $date->copy()->setTime(20, 1, 0);
+            $endApp = $date->copy()->addDay()->setTime(7, 0, 59);
         }
 
         $startUtc = $startApp->copy()->utc();
