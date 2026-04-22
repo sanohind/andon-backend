@@ -509,19 +509,26 @@ class AnalyticsController extends Controller
 
         $linesData = [];
         foreach ($linesInDivision as $lineName) {
-            // 1) Primary: read from oee_records (already computed)
-            $oeeQ = OeeRecord::query()
+            // Ambil address mesin dari inspection_tables sebagai sumber kebenaran line/division.
+            // Ini menghindari kasus oee_records belum terisi kolom division/line_name.
+            $machinesForLine = InspectionTable::query()
                 ->where('division', $selectedDivision)
                 ->where('line_name', $lineName)
-                ->whereNotNull('oee_percent');
+                ->whereNotNull('address')
+                ->get(['address', 'name', 'cycle_time', 'cavity', 'ot_enabled']);
 
-            if ($period === 'monthly') {
-                $oeeQ->whereBetween('shift_date', [$rangeStart->format('Y-m-d'), $rangeEnd->format('Y-m-d')]);
-            } else {
-                $oeeQ->whereBetween('shift_date', [$rangeStart->format('Y-m-d'), $rangeEnd->format('Y-m-d')]);
+            $addresses = $machinesForLine->pluck('address')->filter()->values()->all();
+
+            // 1) Primary: read from oee_records by machine_address
+            $recs = collect();
+            if (!empty($addresses)) {
+                $oeeQ = OeeRecord::query()
+                    ->whereIn('machine_address', $addresses)
+                    ->whereNotNull('oee_percent')
+                    ->whereBetween('shift_date', [$rangeStart->format('Y-m-d'), $rangeEnd->format('Y-m-d')]);
+
+                $recs = $oeeQ->get(['shift_date', 'oee_percent', 'machine_address']);
             }
-
-            $recs = $oeeQ->get(['shift_date', 'oee_percent']);
 
             $daily = [];
             if ($recs->count() > 0) {
@@ -560,13 +567,8 @@ class AnalyticsController extends Controller
                 // 2) Fallback (best-effort) jika belum ada snapshot oee_records sama sekali.
                 // Untuk menjaga performa, fallback hanya aktif untuk mode bulanan (harian).
                 if ($period === 'monthly') {
-                    $machines = InspectionTable::where('division', $selectedDivision)
-                        ->where('line_name', $lineName)
-                        ->whereNotNull('address')
-                        ->get(['address', 'name', 'cycle_time', 'cavity', 'ot_enabled']);
-
                     $machineByAddress = [];
-                    foreach ($machines as $m) {
+                    foreach ($machinesForLine as $m) {
                         if ($m->address) $machineByAddress[$m->address] = $m;
                     }
                     $addresses = array_keys($machineByAddress);
