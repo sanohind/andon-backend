@@ -994,6 +994,43 @@ class AnalyticsController extends Controller
     }
 
     /**
+     * Pastikan ada titik OEE untuk jam terakhir window shift (20:00 pagi / 07:00 malam)
+     * bila DB belum menulis baris pada jam tersebut — isi forward dari snapshot terakhir.
+     *
+     * @param array<int, array<string, mixed>> $data
+     * @return array<int, array<string, mixed>>
+     */
+    private function ensureOeeHourlyEndSlot(array $data, Carbon $endSlotApp, string $appTimezone): array
+    {
+        if ($data === []) {
+            return $data;
+        }
+
+        $targetHourKey = $endSlotApp->format('Y-m-d H');
+        foreach ($data as $row) {
+            if (!isset($row['snapshot_at'])) {
+                continue;
+            }
+            $t = Carbon::parse($row['snapshot_at'], $appTimezone);
+            if ($t->format('Y-m-d H') === $targetHourKey) {
+                return $data;
+            }
+        }
+
+        $last = $data[count($data) - 1];
+        $lastT = Carbon::parse($last['snapshot_at'], $appTimezone);
+        if ($lastT->greaterThan($endSlotApp)) {
+            return $data;
+        }
+
+        $padded = $last;
+        $padded['snapshot_at'] = $endSlotApp->format('Y-m-d H:i');
+        $data[] = $padded;
+
+        return $data;
+    }
+
+    /**
      * OEE per jam dari oee_records_hourly untuk satu mesin (line + stacked A/P/Q).
      */
     public function getOeeHourly(Request $request)
@@ -1045,7 +1082,13 @@ class AnalyticsController extends Controller
                 'performance_percent' => $row->performance_percent !== null ? round((float) $row->performance_percent, 2) : null,
                 'quality_percent' => $row->quality_percent !== null ? round((float) $row->quality_percent, 2) : 100.0,
             ];
-        })->values();
+        })->values()->all();
+
+        $shiftDate = Carbon::parse($request->date, $appTimezone);
+        $endSlotApp = $request->shift === 'pagi'
+            ? $shiftDate->copy()->setTime(20, 0, 0)
+            : $shiftDate->copy()->addDay()->setTime(7, 0, 0);
+        $data = $this->ensureOeeHourlyEndSlot($data, $endSlotApp, $appTimezone);
 
         return response()->json([
             'success' => true,
