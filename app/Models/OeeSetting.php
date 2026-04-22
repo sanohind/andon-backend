@@ -10,6 +10,7 @@ class OeeSetting extends Model
 
     protected $fillable = [
         'warning_threshold_percent',
+        'target_efficiency_percent',
     ];
 }
 

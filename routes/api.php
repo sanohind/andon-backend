@@ -31,6 +31,8 @@ Route::prefix('dashboard')->group(function () {
     Route::get('/analytics/detailed-forward', [AnalyticsController::class, 'getDetailedForwardAnalyticsData']);
     Route::get('/analytics/line-quantity', [AnalyticsController::class, 'getLineQuantityComparison']);
     Route::get('/analytics/line-oee', [AnalyticsController::class, 'getLineOeeComparison']);
+    Route::get('/analytics/efficiency-daily', [AnalyticsController::class, 'getDivisionEfficiencyDaily']);
+    Route::get('/analytics/efficiency-drilldown', [AnalyticsController::class, 'getEfficiencyDrilldown']);
     Route::get('/analytics/quantity-hourly', [AnalyticsController::class, 'getQuantityHourly']);
     Route::get('/analytics/quantity-drilldown', [AnalyticsController::class, 'getQuantityDrilldown']);
     Route::get('/analytics/oee-hourly', [AnalyticsController::class, 'getOeeHourly']);

@@ -13,6 +13,7 @@ use App\Models\OeeRecord;
 use App\Models\OeeRecordHourly;
 use App\Models\BreakSchedule;
 use App\Models\MachineSchedule;
+use App\Models\OeeSetting;
 use App\Support\RunningHourOtExtension;
 use Carbon\Carbon;
 
@@ -428,6 +429,277 @@ class AnalyticsController extends Controller
                 ],
             ]
         ]);
+    }
+
+    /**
+     * Akumulasi Efisiensi (OEE) harian per line dalam satu divisi (untuk chart division view).
+     * X = OEE (%), Y = tanggal.
+     *
+     * Query: division (optional), start_date, end_date (required, Y-m-d).
+     */
+    public function getDivisionEfficiencyDaily(Request $request)
+    {
+        $request->validate([
+            'division' => 'nullable|string',
+            'start_date' => 'required|date_format:Y-m-d',
+            'end_date' => 'required|date_format:Y-m-d',
+        ]);
+
+        $availableDivisions = InspectionTable::select('division')
+            ->whereNotNull('division')
+            ->distinct()
+            ->orderBy('division')
+            ->get()
+            ->pluck('division')
+            ->filter()
+            ->values();
+
+        if ($availableDivisions->isEmpty()) {
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'divisions' => [],
+                    'division' => null,
+                    'dates' => [],
+                    'lines' => [],
+                ]
+            ]);
+        }
+
+        $selectedDivision = $request->division ?: $availableDivisions->first();
+
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $start = Carbon::parse($request->start_date, $appTimezone)->startOfDay();
+        $end = Carbon::parse($request->end_date, $appTimezone)->startOfDay();
+        if ($end->lt($start)) {
+            [$start, $end] = [$end, $start];
+        }
+
+        // Build date labels inclusive (local dates)
+        $dates = [];
+        $cur = $start->copy();
+        while ($cur->lte($end)) {
+            $dates[] = $cur->format('Y-m-d');
+            $cur->addDay();
+        }
+
+        $linesInDivision = InspectionTable::select('line_name')
+            ->where('division', $selectedDivision)
+            ->whereNotNull('line_name')
+            ->distinct()
+            ->orderBy('line_name')
+            ->get()
+            ->pluck('line_name')
+            ->filter()
+            ->values();
+
+        $linesData = [];
+        foreach ($linesInDivision as $lineName) {
+            $machines = InspectionTable::where('division', $selectedDivision)
+                ->where('line_name', $lineName)
+                ->whereNotNull('address')
+                ->get(['address', 'name', 'cycle_time', 'cavity', 'ot_enabled']);
+
+            $machineByAddress = [];
+            foreach ($machines as $m) {
+                if ($m->address) $machineByAddress[$m->address] = $m;
+            }
+            $addresses = array_keys($machineByAddress);
+            if (empty($addresses)) {
+                $linesData[] = ['line_name' => $lineName, 'daily' => []];
+                continue;
+            }
+
+            $daily = [];
+            foreach ($dates as $dateStr) {
+                $oeeSum = 0.0;
+                $cnt = 0;
+
+                foreach (['pagi', 'malam'] as $shift) {
+                    // Best-effort use snapshots if present; else fallback compute.
+                    $recs = OeeRecord::query()
+                        ->where('shift_date', $dateStr)
+                        ->where('shift', $shift)
+                        ->whereIn('machine_address', $addresses)
+                        ->get(['machine_address', 'oee_percent']);
+
+                    $snapMap = [];
+                    foreach ($recs as $r) {
+                        $snapMap[$r->machine_address] = $r;
+                    }
+
+                    foreach ($addresses as $addr) {
+                        $rec = $snapMap[$addr] ?? null;
+                        if ($rec && $rec->oee_percent !== null) {
+                            $oeeSum += (float) $rec->oee_percent;
+                            $cnt++;
+                            continue;
+                        }
+                        $machine = $machineByAddress[$addr];
+                        $fb = $this->computeOeeFallbackForShiftDay($machine, $dateStr, $shift, $appTimezone);
+                        if ($fb['oee'] !== null) {
+                            $oeeSum += (float) $fb['oee'];
+                            $cnt++;
+                        }
+                    }
+                }
+
+                $daily[] = [
+                    'date' => $dateStr,
+                    'oee_percent' => $cnt > 0 ? round($oeeSum / $cnt, 2) : null,
+                ];
+            }
+
+            $linesData[] = [
+                'line_name' => $lineName,
+                'daily' => $daily,
+            ];
+        }
+
+        $setting = OeeSetting::first();
+        $target = $setting && $setting->target_efficiency_percent !== null ? (float) $setting->target_efficiency_percent : 96.0;
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'divisions' => $availableDivisions,
+                'division' => $selectedDivision,
+                'dates' => $dates,
+                'target_efficiency_percent' => $target,
+                'lines' => $linesData,
+            ],
+        ]);
+    }
+
+    /**
+     * Drilldown Efisiensi: semua mesin dalam line pada tanggal tertentu.
+     * Mengembalikan OEE Reguler dan OT untuk shift pagi & malam.
+     *
+     * Query: division(optional), line_name(required), date(required Y-m-d)
+     */
+    public function getEfficiencyDrilldown(Request $request)
+    {
+        $request->validate([
+            'division' => 'nullable|string',
+            'line_name' => 'required|string',
+            'date' => 'required|date_format:Y-m-d',
+        ]);
+
+        $division = $request->division;
+        $lineName = $request->line_name;
+        $dateStr = $request->date;
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+
+        $machinesQ = InspectionTable::query()
+            ->where('line_name', $lineName)
+            ->whereNotNull('address')
+            ->orderBy('name');
+        if ($division) $machinesQ->where('division', $division);
+        $machines = $machinesQ->get();
+
+        $addresses = $machines->pluck('address')->filter()->values()->all();
+        $scheduleRows = MachineSchedule::query()
+            ->where('schedule_date', $dateStr)
+            ->whereIn('machine_address', $addresses)
+            ->get();
+        $scheduleMap = [];
+        foreach ($scheduleRows as $s) {
+            $key = ($s->schedule_date ?? '') . '|' . ($s->shift ?? '') . '|' . ($s->machine_address ?? '');
+            $scheduleMap[$key] = $s;
+        }
+
+        $rows = [];
+        foreach ($machines as $m) {
+            $addr = trim((string) $m->address);
+            if ($addr === '') continue;
+
+            $machineRow = [
+                'name' => $m->name,
+                'address' => $addr,
+                'regular' => [
+                    'pagi' => null,
+                    'malam' => null,
+                ],
+                'ot' => [
+                    'pagi' => null,
+                    'malam' => null,
+                ],
+            ];
+
+            foreach (['pagi', 'malam'] as $shift) {
+                [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
+                [$_, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
+
+                $scheduleKey = $dateStr . '|' . $shift . '|' . $addr;
+                $schedule = $scheduleMap[$scheduleKey] ?? null;
+                $otEnabled = $schedule ? (bool) $schedule->ot_enabled : false;
+                $otDurationType = $schedule ? ($schedule->ot_duration_type ?? null) : null;
+
+                $oeeRegular = $this->computeOeeSimpleInWindow($m, $dateStr, $shift, $startUtc, $endRegulerUtc, $appTimezone, false, null);
+                $machineRow['regular'][$shift] = $oeeRegular;
+
+                if ($otEnabled) {
+                    $oeeOt = $this->computeOeeSimpleInWindow($m, $dateStr, $shift, $endRegulerUtc, $endUtc, $appTimezone, true, $otDurationType);
+                    $machineRow['ot'][$shift] = $oeeOt;
+                } else {
+                    $machineRow['ot'][$shift] = null;
+                }
+            }
+
+            $rows[] = $machineRow;
+        }
+
+        $setting = OeeSetting::first();
+        $target = $setting && $setting->target_efficiency_percent !== null ? (float) $setting->target_efficiency_percent : 96.0;
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'division' => $division,
+                'line_name' => $lineName,
+                'date' => $dateStr,
+                'target_efficiency_percent' => $target,
+                'machines' => $rows,
+            ],
+        ]);
+    }
+
+    private function computeOeeSimpleInWindow(
+        InspectionTable $machine,
+        string $dateStr,
+        string $shift,
+        Carbon $startUtc,
+        Carbon $endUtc,
+        string $appTimezone,
+        bool $otEnabled,
+        ?string $otDurationType
+    ): ?float {
+        $address = trim((string) ($machine->address ?? ''));
+        if ($address === '') return null;
+
+        $cavity = (int) ($machine->cavity ?? 1);
+        if ($cavity < 1) $cavity = 1;
+        $cycle = (int) ($machine->cycle_time ?? 0);
+        if ($cycle <= 0) return null;
+
+        $startApp = $startUtc->copy()->setTimezone($appTimezone);
+        $endApp = $endUtc->copy()->setTimezone($appTimezone);
+
+        $qty = $this->getLatestMachineQuantityInWindow($address, $startUtc, $endUtc, $appTimezone);
+        $runningSeconds = $this->computeRunningHourSecondsForSnapshot(
+            $endApp,
+            $startApp,
+            $shift,
+            $appTimezone,
+            $otEnabled,
+            $otDurationType
+        );
+        if ($runningSeconds <= 0) return null;
+
+        $idealSeconds = (int) $qty * $cavity * $cycle;
+        $oee = ($idealSeconds / $runningSeconds) * 100.0;
+        if (!is_finite($oee)) return null;
+        return round(max(0.0, $oee), 2);
     }
 
     /**
