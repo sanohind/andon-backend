@@ -457,9 +457,6 @@ class InspectionTableController extends Controller
                 }
             }
             
-            // Delete related part configurations first (should cascade, but doing it explicitly for safety)
-            DB::table('part_configurations')->where('address', $table->address)->delete();
-            
             // Delete the inspection table
             $table->delete();
             

@@ -3,133 +3,127 @@
 namespace App\Http\Controllers;
 
 use App\Models\PartConfiguration;
-use App\Models\InspectionTable;
 use Illuminate\Http\Request;
 
 class PartConfigurationController extends Controller
 {
     /**
-     * Display a listing of the resource by address.
+     * GET: without "page" returns all rows (for inspect-tables / filter dropdowns).
+     * With "page" (and optional filters) returns paginated list for Manage > Part.
      */
     public function index(Request $request)
     {
-        $address = $request->query('address');
-        
-        if ($address) {
-            $configurations = PartConfiguration::where('address', $address)->get();
+        $query = PartConfiguration::query()->orderBy('part_number');
+
+        if ($request->filled('part_number')) {
+            $query->where('part_number', $request->part_number);
+        }
+        if ($request->filled('part_name')) {
+            $query->where('part_name', $request->part_name);
+        }
+
+        if ($request->filled('page') || $request->filled('per_page')) {
+            $perPage = min(max((int) $request->get('per_page', 10), 5), 100);
+            $paginated = $query->paginate($perPage);
+
             return response()->json([
                 'success' => true,
-                'data' => $configurations
+                'data' => $paginated->items(),
+                'current_page' => $paginated->currentPage(),
+                'last_page' => $paginated->lastPage(),
+                'per_page' => $paginated->perPage(),
+                'total' => $paginated->total(),
             ]);
         }
-        
-        $configurations = PartConfiguration::all();
+
+        $configurations = $query->get();
+
         return response()->json([
             'success' => true,
-            'data' => $configurations
+            'data' => $configurations,
         ]);
     }
 
-    /**
-     * Store a newly created resource in storage.
-     */
     public function store(Request $request)
     {
-        // Block write operations for management role
         if ($blockResponse = $this->blockManagementWrite($request)) {
             return $blockResponse;
         }
 
         $validated = $request->validate([
-            'address' => 'required|string|exists:inspection_tables,address',
-            'channel' => 'required|integer|min:0',
-            'part_number' => 'required|string|max:255',
+            'part_number' => 'required|string|max:255|unique:part_configurations,part_number',
+            'part_name' => 'required|string|max:255',
             'cycle_time' => 'nullable|integer|min:0',
-            'jumlah_bending' => 'required|integer|min:0',
-            'cavity' => 'required|integer|min:0'
         ]);
 
         $configuration = PartConfiguration::create($validated);
 
         return response()->json([
             'success' => true,
-            'message' => 'Part configuration berhasil ditambahkan',
-            'data' => $configuration
+            'message' => 'Part berhasil ditambahkan',
+            'data' => $configuration,
         ], 201);
     }
 
-    /**
-     * Display the specified resource.
-     */
     public function show(string $id)
     {
         $configuration = PartConfiguration::find($id);
-        
+
         if (!$configuration) {
             return response()->json([
                 'success' => false,
-                'message' => 'Part configuration tidak ditemukan'
+                'message' => 'Part tidak ditemukan',
             ], 404);
         }
 
         return response()->json([
             'success' => true,
-            'data' => $configuration
+            'data' => $configuration,
         ]);
     }
 
-    /**
-     * Update the specified resource in storage.
-     */
     public function update(Request $request, string $id)
     {
-        // Block write operations for management role
         if ($blockResponse = $this->blockManagementWrite($request)) {
             return $blockResponse;
         }
 
         $configuration = PartConfiguration::find($id);
-        
+
         if (!$configuration) {
             return response()->json([
                 'success' => false,
-                'message' => 'Part configuration tidak ditemukan'
+                'message' => 'Part tidak ditemukan',
             ], 404);
         }
 
         $validated = $request->validate([
-            'channel' => 'sometimes|required|integer|min:0',
-            'part_number' => 'sometimes|required|string|max:255',
+            'part_number' => 'sometimes|required|string|max:255|unique:part_configurations,part_number,' . $configuration->id,
+            'part_name' => 'sometimes|required|string|max:255',
             'cycle_time' => 'nullable|integer|min:0',
-            'jumlah_bending' => 'sometimes|required|integer|min:0',
-            'cavity' => 'sometimes|required|integer|min:0'
         ]);
 
         $configuration->update($validated);
 
         return response()->json([
             'success' => true,
-            'message' => 'Part configuration berhasil diupdate',
-            'data' => $configuration
+            'message' => 'Part berhasil diupdate',
+            'data' => $configuration,
         ]);
     }
 
-    /**
-     * Remove the specified resource from storage.
-     */
     public function destroy(Request $request, string $id)
     {
-        // Block write operations for management role
         if ($blockResponse = $this->blockManagementWrite($request)) {
             return $blockResponse;
         }
 
         $configuration = PartConfiguration::find($id);
-        
+
         if (!$configuration) {
             return response()->json([
                 'success' => false,
-                'message' => 'Part configuration tidak ditemukan'
+                'message' => 'Part tidak ditemukan',
             ], 404);
         }
 
@@ -137,28 +131,24 @@ class PartConfigurationController extends Controller
 
         return response()->json([
             'success' => true,
-            'message' => 'Part configuration berhasil dihapus'
+            'message' => 'Part berhasil dihapus',
         ]);
     }
 
     /**
-     * Bulk import part configurations.
+     * Upsert by part_number (Manage > Part import / legacy).
      */
     public function bulkImport(Request $request)
     {
-        // Block write operations for management role
         if ($blockResponse = $this->blockManagementWrite($request)) {
             return $blockResponse;
         }
 
         $request->validate([
             'configurations' => 'required|array',
-            'configurations.*.address' => 'required|string|exists:inspection_tables,address',
-            'configurations.*.channel' => 'required|integer|min:0',
             'configurations.*.part_number' => 'required|string|max:255',
+            'configurations.*.part_name' => 'required|string|max:255',
             'configurations.*.cycle_time' => 'nullable|integer|min:0',
-            'configurations.*.jumlah_bending' => 'required|integer|min:0',
-            'configurations.*.cavity' => 'required|integer|min:0'
         ]);
 
         $created = 0;
@@ -167,29 +157,26 @@ class PartConfigurationController extends Controller
 
         foreach ($request->configurations as $index => $configData) {
             try {
-                // Check if configuration exists (by address, channel, and part_number)
-                $existing = PartConfiguration::where('address', $configData['address'])
-                    ->where('channel', $configData['channel'])
-                    ->where('part_number', $configData['part_number'])
-                    ->first();
+                $existing = PartConfiguration::where('part_number', $configData['part_number'])->first();
 
                 if ($existing) {
-                    // Update existing configuration
                     $existing->update([
+                        'part_name' => $configData['part_name'],
                         'cycle_time' => $configData['cycle_time'] ?? null,
-                        'jumlah_bending' => $configData['jumlah_bending'],
-                        'cavity' => $configData['cavity']
                     ]);
                     $updated++;
                 } else {
-                    // Create new configuration
-                    PartConfiguration::create($configData);
+                    PartConfiguration::create([
+                        'part_number' => $configData['part_number'],
+                        'part_name' => $configData['part_name'],
+                        'cycle_time' => $configData['cycle_time'] ?? null,
+                    ]);
                     $created++;
                 }
             } catch (\Exception $e) {
                 $errors[] = [
                     'index' => $index + 1,
-                    'message' => $e->getMessage()
+                    'message' => $e->getMessage(),
                 ];
             }
         }
@@ -199,7 +186,7 @@ class PartConfigurationController extends Controller
             'message' => 'Bulk import selesai',
             'created' => $created,
             'updated' => $updated,
-            'errors' => $errors
+            'errors' => $errors,
         ]);
     }
 }
