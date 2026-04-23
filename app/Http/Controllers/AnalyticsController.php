@@ -453,13 +453,16 @@ class AnalyticsController extends Controller
             'year' => 'required_if:period,yearly|nullable|date_format:Y',
         ]);
 
+        $normalize = static fn($value): string => strtolower(trim((string) $value));
+
         $availableDivisions = InspectionTable::select('division')
             ->whereNotNull('division')
-            ->distinct()
-            ->orderBy('division')
             ->get()
             ->pluck('division')
+            ->map(fn($division) => trim((string) $division))
             ->filter()
+            ->unique()
+            ->sort()
             ->values();
 
         if ($availableDivisions->isEmpty()) {
@@ -475,38 +478,40 @@ class AnalyticsController extends Controller
         }
 
         $selectedDivision = trim((string) ($request->division ?? ''));
-        $selectedDivision = $selectedDivision !== '' ? $selectedDivision : null;
-        if ($selectedDivision !== null) {
+        if ($selectedDivision !== '') {
             $divisionMap = [];
             foreach ($availableDivisions as $divisionName) {
                 $divisionMap[$normalize($divisionName)] = $divisionName;
             }
             $selectedDivision = $divisionMap[$normalize($selectedDivision)] ?? $selectedDivision;
+        } else {
+            // Samakan perilaku default dengan chart Production Quantity/OEE.
+            $selectedDivision = $availableDivisions->first();
         }
         $period = $request->period;
 
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
-        $dates = [];
-        $rangeStart = null;
-        $rangeEnd = null;
+        $dateRange = $this->resolveQuantityDateRange($period, null, $request->month, $request->year, $appTimezone);
+        if (!$dateRange) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid month/year for period.',
+                'data' => ['dates' => [], 'lines' => []]
+            ], 422);
+        }
+        [$sourceDates] = $dateRange;
 
-        if ($period === 'monthly') {
-            $month = Carbon::createFromFormat('Y-m', $request->month, $appTimezone)->startOfMonth();
-            $rangeStart = $month->copy()->startOfDay();
-            $rangeEnd = $month->copy()->endOfMonth()->startOfDay();
-            $cur = $rangeStart->copy();
-            while ($cur->lte($rangeEnd)) {
-                $dates[] = $cur->format('Y-m-d');
-                $cur->addDay();
-            }
-        } else {
-            $year = Carbon::createFromFormat('Y', $request->year, $appTimezone)->startOfYear();
-            $rangeStart = $year->copy()->startOfDay();
-            $rangeEnd = $year->copy()->endOfYear()->startOfDay();
+        $dates = $sourceDates;
+        if ($period === 'yearly') {
+            $yearStart = Carbon::createFromFormat('Y', (string) $request->year, $appTimezone)->startOfYear();
+            $dates = [];
             for ($m = 1; $m <= 12; $m++) {
-                $dates[] = $year->copy()->month($m)->format('Y-m');
+                $dates[] = $yearStart->copy()->month($m)->format('Y-m');
             }
         }
+
+        $rangeStart = Carbon::parse($sourceDates[0], $appTimezone)->startOfDay();
+        $rangeEnd = Carbon::parse($sourceDates[count($sourceDates) - 1], $appTimezone)->startOfDay();
 
         $linesQuery = InspectionTable::select('line_name')
             ->whereNotNull('line_name')
@@ -523,80 +528,68 @@ class AnalyticsController extends Controller
             ->sort()
             ->values();
 
+        $allMachines = InspectionTable::query()
+            ->whereNotNull('line_name')
+            ->whereNotNull('address')
+            ->when($selectedDivision !== null, function ($query) use ($normalize, $selectedDivision) {
+                $query->whereRaw('LOWER(TRIM(division)) = ?', [$normalize($selectedDivision)]);
+            })
+            ->get(['address', 'line_name', 'cycle_time', 'cavity', 'ot_enabled', 'ot_duration_type']);
+
+        $machinesByLine = [];
+        foreach ($allMachines as $machine) {
+            $lineKey = trim((string) $machine->line_name);
+            if ($lineKey === '') {
+                continue;
+            }
+            if (!isset($machinesByLine[$lineKey])) {
+                $machinesByLine[$lineKey] = collect();
+            }
+            $machinesByLine[$lineKey]->push($machine);
+        }
+
+        $allAddresses = $allMachines->pluck('address')->filter()->unique()->values()->all();
+        $recordMap = [];
+        if (!empty($allAddresses)) {
+            $recordRows = OeeRecord::query()
+                ->whereIn('machine_address', $allAddresses)
+                ->whereNotNull('oee_percent')
+                ->whereBetween('shift_date', [$rangeStart->format('Y-m-d'), $rangeEnd->format('Y-m-d')])
+                ->get(['shift_date', 'shift', 'machine_address', 'oee_percent']);
+
+            foreach ($recordRows as $row) {
+                $dateKey = $row->shift_date instanceof Carbon
+                    ? $row->shift_date->format('Y-m-d')
+                    : Carbon::parse((string) $row->shift_date, $appTimezone)->format('Y-m-d');
+                $shiftKey = strtolower(trim((string) $row->shift));
+                $addrKey = trim((string) $row->machine_address);
+                if ($dateKey === '' || $shiftKey === '' || $addrKey === '') {
+                    continue;
+                }
+                $recordMap[$dateKey . '|' . $shiftKey . '|' . $addrKey] = (float) $row->oee_percent;
+            }
+        }
+
         $linesData = [];
         foreach ($linesInDivision as $lineName) {
-            // Ambil address mesin dari inspection_tables sebagai sumber kebenaran line/division.
-            // Ini menghindari kasus oee_records belum terisi kolom division/line_name.
-            $machinesForLine = InspectionTable::query()
-                ->when($selectedDivision !== null, function ($query) use ($normalize, $selectedDivision) {
-                    $query->whereRaw('LOWER(TRIM(division)) = ?', [$normalize($selectedDivision)]);
-                })
-                ->whereRaw('LOWER(TRIM(line_name)) = ?', [$normalize($lineName)])
-                ->whereNotNull('address')
-                ->get(['address', 'name', 'cycle_time', 'cavity', 'ot_enabled']);
-
-            $addresses = $machinesForLine->pluck('address')->filter()->values()->all();
-
-            // 1) Primary: read from oee_records by machine_address
-            $recs = collect();
-            if (!empty($addresses)) {
-                $oeeQ = OeeRecord::query()
-                    ->whereIn('machine_address', $addresses)
-                    ->whereNotNull('oee_percent')
-                    ->whereBetween('shift_date', [$rangeStart->format('Y-m-d'), $rangeEnd->format('Y-m-d')]);
-
-                $recs = $oeeQ->get(['shift_date', 'oee_percent', 'machine_address']);
-            }
-
+            $machinesForLine = $machinesByLine[$lineName] ?? collect();
             $daily = [];
-            if ($recs->count() > 0) {
-                if ($period === 'monthly') {
-                    $byDate = [];
-                    foreach ($recs as $r) {
-                        $k = (string) $r->shift_date;
-                        if (!isset($byDate[$k])) $byDate[$k] = ['sum' => 0.0, 'cnt' => 0];
-                        $byDate[$k]['sum'] += (float) $r->oee_percent;
-                        $byDate[$k]['cnt']++;
-                    }
-                    foreach ($dates as $dateStr) {
-                        $row = $byDate[$dateStr] ?? null;
-                        $daily[] = [
-                            'date' => $dateStr,
-                            'oee_percent' => $row && $row['cnt'] > 0 ? round($row['sum'] / $row['cnt'], 2) : null,
-                        ];
-                    }
-                } else {
-                    $byMonth = [];
-                    foreach ($recs as $r) {
-                        $mKey = Carbon::parse($r->shift_date, $appTimezone)->format('Y-m');
-                        if (!isset($byMonth[$mKey])) $byMonth[$mKey] = ['sum' => 0.0, 'cnt' => 0];
-                        $byMonth[$mKey]['sum'] += (float) $r->oee_percent;
-                        $byMonth[$mKey]['cnt']++;
-                    }
-                    foreach ($dates as $monthKey) {
-                        $row = $byMonth[$monthKey] ?? null;
-                        $daily[] = [
-                            'date' => $monthKey,
-                            'oee_percent' => $row && $row['cnt'] > 0 ? round($row['sum'] / $row['cnt'], 2) : null,
-                        ];
-                    }
-                }
-            } else {
-                // 2) Fallback (best-effort) jika belum ada snapshot oee_records sama sekali.
-                // Untuk menjaga performa, fallback hanya aktif untuk mode bulanan (harian).
-                if ($period === 'monthly') {
-                    $machineByAddress = [];
-                    foreach ($machinesForLine as $m) {
-                        if ($m->address) $machineByAddress[$m->address] = $m;
-                    }
-                    $addresses = array_keys($machineByAddress);
+            if ($period === 'monthly') {
+                foreach ($sourceDates as $dateStr) {
+                    $oeeSum = 0.0;
+                    $cnt = 0;
+                    foreach ($machinesForLine as $machine) {
+                        $address = trim((string) ($machine->address ?? ''));
+                        if ($address === '') {
+                            continue;
+                        }
 
-                    foreach ($dates as $dateStr) {
-                        $oeeSum = 0.0;
-                        $cnt = 0;
                         foreach (['pagi', 'malam'] as $shift) {
-                            foreach ($addresses as $addr) {
-                                $machine = $machineByAddress[$addr];
+                            $mapKey = $dateStr . '|' . $shift . '|' . $address;
+                            if (array_key_exists($mapKey, $recordMap)) {
+                                $oeeSum += (float) $recordMap[$mapKey];
+                                $cnt++;
+                            } else {
                                 $fb = $this->computeOeeFallbackForShiftDay($machine, $dateStr, $shift, $appTimezone);
                                 if ($fb['oee'] !== null) {
                                     $oeeSum += (float) $fb['oee'];
@@ -604,15 +597,48 @@ class AnalyticsController extends Controller
                                 }
                             }
                         }
-                        $daily[] = [
-                            'date' => $dateStr,
-                            'oee_percent' => $cnt > 0 ? round($oeeSum / $cnt, 2) : null,
-                        ];
                     }
-                } else {
-                    foreach ($dates as $monthKey) {
-                        $daily[] = ['date' => $monthKey, 'oee_percent' => null];
+
+                    $daily[] = [
+                        'date' => $dateStr,
+                        'oee_percent' => $cnt > 0 ? round($oeeSum / $cnt, 2) : null,
+                    ];
+                }
+            } else {
+                $monthBucket = [];
+                foreach ($sourceDates as $dateStr) {
+                    $monthKey = Carbon::parse($dateStr, $appTimezone)->format('Y-m');
+                    if (!isset($monthBucket[$monthKey])) {
+                        $monthBucket[$monthKey] = ['sum' => 0.0, 'cnt' => 0];
                     }
+                    foreach ($machinesForLine as $machine) {
+                        $address = trim((string) ($machine->address ?? ''));
+                        if ($address === '') {
+                            continue;
+                        }
+
+                        foreach (['pagi', 'malam'] as $shift) {
+                            $mapKey = $dateStr . '|' . $shift . '|' . $address;
+                            if (array_key_exists($mapKey, $recordMap)) {
+                                $monthBucket[$monthKey]['sum'] += (float) $recordMap[$mapKey];
+                                $monthBucket[$monthKey]['cnt']++;
+                            } else {
+                                $fb = $this->computeOeeFallbackForShiftDay($machine, $dateStr, $shift, $appTimezone);
+                                if ($fb['oee'] !== null) {
+                                    $monthBucket[$monthKey]['sum'] += (float) $fb['oee'];
+                                    $monthBucket[$monthKey]['cnt']++;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                foreach ($dates as $monthKey) {
+                    $row = $monthBucket[$monthKey] ?? null;
+                    $daily[] = [
+                        'date' => $monthKey,
+                        'oee_percent' => $row && $row['cnt'] > 0 ? round($row['sum'] / $row['cnt'], 2) : null,
+                    ];
                 }
             }
 
