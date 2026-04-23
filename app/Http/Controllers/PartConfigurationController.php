@@ -21,6 +21,9 @@ class PartConfigurationController extends Controller
         if ($request->filled('part_name')) {
             $query->where('part_name', $request->part_name);
         }
+        if ($request->filled('line_name')) {
+            $query->where('line_name', $request->line_name);
+        }
 
         if ($request->filled('page') || $request->filled('per_page')) {
             $perPage = min(max((int) $request->get('per_page', 10), 5), 100);
@@ -53,7 +56,9 @@ class PartConfigurationController extends Controller
         $validated = $request->validate([
             'part_number' => 'required|string|max:255|unique:part_configurations,part_number',
             'part_name' => 'required|string|max:255',
-            'cycle_time' => 'nullable|integer|min:0',
+            'channel' => 'nullable|integer|min:0',
+            'line_name' => 'nullable|string|max:50',
+            'cycle_time' => 'required|integer|min:0',
         ]);
 
         $configuration = PartConfiguration::create($validated);
@@ -100,7 +105,9 @@ class PartConfigurationController extends Controller
         $validated = $request->validate([
             'part_number' => 'sometimes|required|string|max:255|unique:part_configurations,part_number,' . $configuration->id,
             'part_name' => 'sometimes|required|string|max:255',
-            'cycle_time' => 'nullable|integer|min:0',
+            'channel' => 'sometimes|nullable|integer|min:0',
+            'line_name' => 'sometimes|nullable|string|max:50',
+            'cycle_time' => 'sometimes|required|integer|min:0',
         ]);
 
         $configuration->update($validated);
@@ -148,7 +155,9 @@ class PartConfigurationController extends Controller
             'configurations' => 'required|array',
             'configurations.*.part_number' => 'required|string|max:255',
             'configurations.*.part_name' => 'required|string|max:255',
-            'configurations.*.cycle_time' => 'nullable|integer|min:0',
+            'configurations.*.channel' => 'nullable|integer|min:0',
+            'configurations.*.line_name' => 'nullable|string|max:50',
+            'configurations.*.cycle_time' => 'required|integer|min:0',
         ]);
 
         $created = 0;
@@ -162,14 +171,18 @@ class PartConfigurationController extends Controller
                 if ($existing) {
                     $existing->update([
                         'part_name' => $configData['part_name'],
-                        'cycle_time' => $configData['cycle_time'] ?? null,
+                        'channel' => $configData['channel'],
+                        'line_name' => $configData['line_name'],
+                        'cycle_time' => $configData['cycle_time'],
                     ]);
                     $updated++;
                 } else {
                     PartConfiguration::create([
                         'part_number' => $configData['part_number'],
                         'part_name' => $configData['part_name'],
-                        'cycle_time' => $configData['cycle_time'] ?? null,
+                        'channel' => $configData['channel'],
+                        'line_name' => $configData['line_name'],
+                        'cycle_time' => $configData['cycle_time'],
                     ]);
                     $created++;
                 }

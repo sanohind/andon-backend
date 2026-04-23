@@ -14,10 +14,13 @@ class PartConfiguration extends Model
     protected $fillable = [
         'part_number',
         'part_name',
+        'channel',
+        'line_name',
         'cycle_time',
     ];
 
     protected $casts = [
+        'channel' => 'integer',
         'cycle_time' => 'integer',
     ];
 }
