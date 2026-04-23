@@ -164,13 +164,16 @@ class AnalyticsController extends Controller
             'shift' => 'required|in:pagi,malam',
         ]);
 
+        $normalize = static fn($value): string => strtolower(trim((string) $value));
+
         $availableDivisions = InspectionTable::select('division')
             ->whereNotNull('division')
-            ->distinct()
-            ->orderBy('division')
             ->get()
             ->pluck('division')
+            ->map(fn($division) => trim((string) $division))
             ->filter()
+            ->unique()
+            ->sort()
             ->values();
 
         if ($availableDivisions->isEmpty()) {
@@ -471,7 +474,15 @@ class AnalyticsController extends Controller
             ]);
         }
 
-        $selectedDivision = $request->division ?: $availableDivisions->first();
+        $selectedDivision = trim((string) ($request->division ?? ''));
+        $selectedDivision = $selectedDivision !== '' ? $selectedDivision : null;
+        if ($selectedDivision !== null) {
+            $divisionMap = [];
+            foreach ($availableDivisions as $divisionName) {
+                $divisionMap[$normalize($divisionName)] = $divisionName;
+            }
+            $selectedDivision = $divisionMap[$normalize($selectedDivision)] ?? $selectedDivision;
+        }
         $period = $request->period;
 
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
@@ -497,14 +508,19 @@ class AnalyticsController extends Controller
             }
         }
 
-        $linesInDivision = InspectionTable::select('line_name')
-            ->where('division', $selectedDivision)
+        $linesQuery = InspectionTable::select('line_name')
             ->whereNotNull('line_name')
-            ->distinct()
-            ->orderBy('line_name')
+            ->when($selectedDivision !== null, function ($query) use ($normalize, $selectedDivision) {
+                $query->whereRaw('LOWER(TRIM(division)) = ?', [$normalize($selectedDivision)]);
+            });
+
+        $linesInDivision = $linesQuery
             ->get()
             ->pluck('line_name')
+            ->map(fn($lineName) => trim((string) $lineName))
             ->filter()
+            ->unique()
+            ->sort()
             ->values();
 
         $linesData = [];
@@ -512,8 +528,10 @@ class AnalyticsController extends Controller
             // Ambil address mesin dari inspection_tables sebagai sumber kebenaran line/division.
             // Ini menghindari kasus oee_records belum terisi kolom division/line_name.
             $machinesForLine = InspectionTable::query()
-                ->where('division', $selectedDivision)
-                ->where('line_name', $lineName)
+                ->when($selectedDivision !== null, function ($query) use ($normalize, $selectedDivision) {
+                    $query->whereRaw('LOWER(TRIM(division)) = ?', [$normalize($selectedDivision)]);
+                })
+                ->whereRaw('LOWER(TRIM(line_name)) = ?', [$normalize($lineName)])
                 ->whereNotNull('address')
                 ->get(['address', 'name', 'cycle_time', 'cavity', 'ot_enabled']);
 
@@ -645,10 +663,12 @@ class AnalyticsController extends Controller
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
 
         $machinesQ = InspectionTable::query()
-            ->where('line_name', $lineName)
+            ->whereRaw('LOWER(TRIM(line_name)) = ?', [strtolower(trim($lineName))])
             ->whereNotNull('address')
             ->orderBy('name');
-        if ($division) $machinesQ->where('division', $division);
+        if ($division) {
+            $machinesQ->whereRaw('LOWER(TRIM(division)) = ?', [strtolower(trim($division))]);
+        }
         $machines = $machinesQ->get();
 
         $addresses = $machines->pluck('address')->filter()->values()->all();
