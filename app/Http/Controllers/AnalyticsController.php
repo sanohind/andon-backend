@@ -1414,62 +1414,44 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Bangun deret titik OEE per jam yang lengkap untuk window shift.
-     * Setiap jam memakai snapshot terakhir pada jam tsb; jika kosong, nilai di-forward
-     * dari jam sebelumnya agar line chart dan nilai stacked penutup shift tetap stabil.
+     * Jika shift sudah selesai, pastikan ada titik penutup shift (20:00/07:00)
+     * dengan carry nilai terakhir agar tidak putus di satu jam sebelum akhir.
      *
      * @param array<int, array<string, mixed>> $data
      * @return array<int, array<string, mixed>>
      */
-    private function normalizeOeeHourlySeries(
+    private function ensureOeeHourlyEndSlotAfterShiftEnd(
         array $data,
-        Carbon $startApp,
         Carbon $endSlotApp,
+        Carbon $nowApp,
         string $appTimezone
     ): array {
-        if ($data === []) {
+        if ($data === [] || $nowApp->lt($endSlotApp)) {
             return $data;
         }
 
-        $byHour = [];
+        $targetHourKey = $endSlotApp->format('Y-m-d H');
         foreach ($data as $row) {
             if (!isset($row['snapshot_at'])) {
                 continue;
             }
             $t = Carbon::parse((string) $row['snapshot_at'], $appTimezone);
-            $hourKey = $t->format('Y-m-d H');
-
-            if (!isset($byHour[$hourKey])) {
-                $byHour[$hourKey] = ['time' => $t, 'row' => $row];
-                continue;
-            }
-
-            if ($t->greaterThan($byHour[$hourKey]['time'])) {
-                $byHour[$hourKey] = ['time' => $t, 'row' => $row];
+            if ($t->format('Y-m-d H') === $targetHourKey) {
+                return $data;
             }
         }
 
-        $slot = $startApp->copy()->startOfHour();
-        if ($slot->lessThan($startApp)) {
-            $slot->addHour();
+        $last = $data[count($data) - 1];
+        $lastT = Carbon::parse((string) ($last['snapshot_at'] ?? ''), $appTimezone);
+        if ($lastT->greaterThan($endSlotApp)) {
+            return $data;
         }
 
-        $out = [];
-        $carry = null;
-        while ($slot->lessThanOrEqualTo($endSlotApp)) {
-            $hourKey = $slot->format('Y-m-d H');
-            if (isset($byHour[$hourKey])) {
-                $carry = $byHour[$hourKey]['row'];
-            }
-            if ($carry !== null) {
-                $point = $carry;
-                $point['snapshot_at'] = $slot->format('Y-m-d H:i');
-                $out[] = $point;
-            }
-            $slot->addHour();
-        }
+        $padded = $last;
+        $padded['snapshot_at'] = $endSlotApp->format('Y-m-d H:i');
+        $data[] = $padded;
 
-        return $out;
+        return $data;
     }
 
     /**
@@ -1494,43 +1476,115 @@ class AnalyticsController extends Controller
         );
         $startApp = $startUtc->copy()->setTimezone($appTimezone);
         $endApp = $endUtc->copy()->setTimezone($appTimezone);
+        $nowApp = Carbon::now($appTimezone);
+        $effectiveEndApp = $nowApp->lessThan($endApp) ? $nowApp->copy() : $endApp->copy();
+        if ($effectiveEndApp->lt($startApp)) {
+            return response()->json([
+                'success' => true,
+                'data' => [],
+            ]);
+        }
         $startStr = $startApp->format('Y-m-d H:i:s');
-        $endStr = $endApp->format('Y-m-d H:i:s');
+        $effectiveEndStr = $effectiveEndApp->format('Y-m-d H:i:s');
 
-        $rows = OeeRecordHourly::query()
-            ->where('machine_address', $address)
-            ->whereBetween('snapshot_at', [$startStr, $endStr])
+        // Ikuti logika sumber yang sama dengan chart quantity per jam:
+        // ambil snapshot production_data_hourly lalu hitung OEE dari quantity vs ideal_qty.
+        $prodRows = ProductionDataHourly::query()
+            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->orderBy('snapshot_at', 'asc')
+            ->get();
+        if ($prodRows->isEmpty()) {
+            return response()->json([
+                'success' => true,
+                'data' => [],
+            ]);
+        }
+
+        $otSettingsForDay = $this->getOtSettingsForMachineForScheduleDay(
+            $address,
+            $request->date,
+            $request->shift
+        );
+        $cycleTime = $this->getCycleTimeForMachine($address);
+        $cavity = $this->getCavityForMachine($address);
+        [$anchorTime, $anchorBoardQty] = $this->resolveQuantityHourlyAnchorBeforeShift(
+            $address,
+            $addressLower,
+            $startStr,
+            $appTimezone
+        );
+        if ($anchorTime === null) {
+            $anchorTime = $startApp->copy();
+            $anchorBoardQty = 0;
+        }
+
+        $qtySeries = $this->buildQuantityHourlyCumulativeSeries(
+            $prodRows,
+            $anchorTime,
+            $anchorBoardQty,
+            $startApp,
+            $request->shift,
+            $appTimezone,
+            $cycleTime,
+            $cavity,
+            $otSettingsForDay
+        );
+
+        $oeeRows = OeeRecordHourly::query()
+            ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
             ->orderBy('snapshot_at', 'asc')
             ->get();
 
-        if ($rows->isEmpty() && $address !== '') {
-            $rows = OeeRecordHourly::query()
-                ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
-                ->whereBetween('snapshot_at', [$startStr, $endStr])
-                ->orderBy('snapshot_at', 'asc')
-                ->get();
-        }
+        $apqByHour = [];
+        foreach ($oeeRows as $row) {
+            $snapshotAt = $row->snapshot_at instanceof Carbon
+                ? $row->snapshot_at->copy()->setTimezone($appTimezone)
+                : Carbon::parse((string) $row->snapshot_at, $appTimezone);
+            $hourKey = $snapshotAt->format('Y-m-d H');
 
-        $data = $rows->map(function ($row) use ($appTimezone) {
-            $snapshotAt = $row->snapshot_at;
-            $snapshotAtApp = $snapshotAt instanceof Carbon
-                ? $snapshotAt->copy()->setTimezone($appTimezone)
-                : Carbon::parse($snapshotAt)->setTimezone($appTimezone);
-
-            return [
-                'snapshot_at' => $snapshotAtApp->format('Y-m-d H:i'),
-                'oee_percent' => $row->oee_percent !== null ? round((float) $row->oee_percent, 2) : null,
+            $apqByHour[$hourKey] = [
                 'availability_percent' => $row->availability_percent !== null ? round((float) $row->availability_percent, 2) : null,
                 'performance_percent' => $row->performance_percent !== null ? round((float) $row->performance_percent, 2) : null,
                 'quality_percent' => $row->quality_percent !== null ? round((float) $row->quality_percent, 2) : 100.0,
             ];
-        })->values()->all();
+        }
+
+        $lastA = null;
+        $lastP = null;
+        $lastQ = 100.0;
+        $data = [];
+        foreach ($qtySeries as $q) {
+            $snapshotAt = (string) ($q['snapshot_at'] ?? '');
+            $qty = max(0, (int) ($q['quantity'] ?? 0));
+            $ideal = max(0, (int) ($q['ideal_quantity'] ?? 0));
+            $oee = $ideal > 0 ? round(($qty / $ideal) * 100, 2) : null;
+
+            $hourKey = Carbon::parse($snapshotAt, $appTimezone)->format('Y-m-d H');
+            if (isset($apqByHour[$hourKey])) {
+                $a = $apqByHour[$hourKey]['availability_percent'];
+                $p = $apqByHour[$hourKey]['performance_percent'];
+                $qv = $apqByHour[$hourKey]['quality_percent'];
+                if ($a !== null) $lastA = $a;
+                if ($p !== null) $lastP = $p;
+                if ($qv !== null) $lastQ = $qv;
+            }
+
+            $data[] = [
+                'snapshot_at' => $snapshotAt,
+                'oee_percent' => $oee,
+                'availability_percent' => $lastA,
+                'performance_percent' => $lastP,
+                'quality_percent' => $lastQ,
+            ];
+        }
 
         $shiftDate = Carbon::parse($request->date, $appTimezone);
         $endSlotApp = $request->shift === 'pagi'
             ? $shiftDate->copy()->setTime(20, 0, 0)
             : $shiftDate->copy()->addDay()->setTime(7, 0, 0);
-        $data = $this->normalizeOeeHourlySeries($data, $startApp, $endSlotApp, $appTimezone);
+        $data = $this->ensureOeeHourlyEndSlotAfterShiftEnd($data, $endSlotApp, $nowApp, $appTimezone);
 
         return response()->json([
             'success' => true,

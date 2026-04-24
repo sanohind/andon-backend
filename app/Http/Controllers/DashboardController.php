@@ -3435,7 +3435,13 @@ class DashboardController extends Controller
 
                 $cycle = (int) ($cycles[$addr] ?? 0);
                 $cavity = max(1, (int) ($m['cavity'] ?? 1));
-                $qty = (int) ($m['quantity'] ?? 0);
+                // Samakan basis quantity dengan snapshot produksi per jam
+                // (production_data / production_data_hourly), agar tidak beda sumber.
+                $latestProduction = ProductionData::query()
+                    ->whereRaw('LOWER(TRIM(machine_name)) = ?', [strtolower($addr)])
+                    ->orderBy('timestamp', 'desc')
+                    ->first(['quantity']);
+                $qty = $latestProduction ? (int) ($latestProduction->quantity ?? 0) : (int) ($m['quantity'] ?? 0);
                 $rt = (int) ($m['runtime_seconds'] ?? 0);
                 $rh = (int) ($m['running_hour_seconds'] ?? 0);
 
