@@ -1414,40 +1414,62 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Pastikan ada titik OEE untuk jam terakhir window shift (20:00 pagi / 07:00 malam)
-     * bila DB belum menulis baris pada jam tersebut — isi forward dari snapshot terakhir.
+     * Bangun deret titik OEE per jam yang lengkap untuk window shift.
+     * Setiap jam memakai snapshot terakhir pada jam tsb; jika kosong, nilai di-forward
+     * dari jam sebelumnya agar line chart dan nilai stacked penutup shift tetap stabil.
      *
      * @param array<int, array<string, mixed>> $data
      * @return array<int, array<string, mixed>>
      */
-    private function ensureOeeHourlyEndSlot(array $data, Carbon $endSlotApp, string $appTimezone): array
-    {
+    private function normalizeOeeHourlySeries(
+        array $data,
+        Carbon $startApp,
+        Carbon $endSlotApp,
+        string $appTimezone
+    ): array {
         if ($data === []) {
             return $data;
         }
 
-        $targetHourKey = $endSlotApp->format('Y-m-d H');
+        $byHour = [];
         foreach ($data as $row) {
             if (!isset($row['snapshot_at'])) {
                 continue;
             }
-            $t = Carbon::parse($row['snapshot_at'], $appTimezone);
-            if ($t->format('Y-m-d H') === $targetHourKey) {
-                return $data;
+            $t = Carbon::parse((string) $row['snapshot_at'], $appTimezone);
+            $hourKey = $t->format('Y-m-d H');
+
+            if (!isset($byHour[$hourKey])) {
+                $byHour[$hourKey] = ['time' => $t, 'row' => $row];
+                continue;
+            }
+
+            if ($t->greaterThan($byHour[$hourKey]['time'])) {
+                $byHour[$hourKey] = ['time' => $t, 'row' => $row];
             }
         }
 
-        $last = $data[count($data) - 1];
-        $lastT = Carbon::parse($last['snapshot_at'], $appTimezone);
-        if ($lastT->greaterThan($endSlotApp)) {
-            return $data;
+        $slot = $startApp->copy()->startOfHour();
+        if ($slot->lessThan($startApp)) {
+            $slot->addHour();
         }
 
-        $padded = $last;
-        $padded['snapshot_at'] = $endSlotApp->format('Y-m-d H:i');
-        $data[] = $padded;
+        $out = [];
+        $carry = null;
+        while ($slot->lessThanOrEqualTo($endSlotApp)) {
+            $hourKey = $slot->format('Y-m-d H');
+            if (isset($byHour[$hourKey])) {
+                $carry = $byHour[$hourKey]['row'];
+            }
+            if ($carry !== null) {
+                $point = $carry;
+                $point['snapshot_at'] = $slot->format('Y-m-d H:i');
+                $out[] = $point;
+            }
+            $slot->addHour();
+        }
 
-        return $data;
+        return $out;
     }
 
     /**
@@ -1508,7 +1530,7 @@ class AnalyticsController extends Controller
         $endSlotApp = $request->shift === 'pagi'
             ? $shiftDate->copy()->setTime(20, 0, 0)
             : $shiftDate->copy()->addDay()->setTime(7, 0, 0);
-        $data = $this->ensureOeeHourlyEndSlot($data, $endSlotApp, $appTimezone);
+        $data = $this->normalizeOeeHourlySeries($data, $startApp, $endSlotApp, $appTimezone);
 
         return response()->json([
             'success' => true,
