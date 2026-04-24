@@ -301,7 +301,7 @@ class AnalyticsController extends Controller
 
     /**
      * OEE per mesin per line — filter tanggal/shift/divisi sama seperti Production Quantity.
-     * Sumber utama: oee_records; fallback dari production + running hour jika belum ada snapshot.
+     * Logika diselaraskan dengan endpoint OEE per jam (basis quantity/ideal dari production hourly).
      */
     public function getLineOeeComparison(Request $request)
     {
@@ -803,50 +803,105 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Fallback OEE jika belum ada baris oee_records (tanpa data runtime historis → runtime = running hour).
+     * Hitung metrik OEE akumulasi per shift-day dengan logika yang sama seperti OEE per jam:
+     * - basis quantity/ideal dari production_data_hourly (series kumulatif),
+     * - titik akhir mengikuti waktu berjalan jika shift masih aktif,
+     * - A/P/Q dipakai dari snapshot OEE hourly terbaru dalam window yang sama.
      */
-    private function computeOeeFallbackForShiftDay(InspectionTable $machine, string $dateStr, string $shift, string $appTimezone): array
+    private function computeOeeAlignedForShiftDay(InspectionTable $machine, string $dateStr, string $shift, string $appTimezone): array
     {
         $address = trim($machine->address ?? '');
         if ($address === '') {
             return ['oee' => null, 'availability' => null, 'performance' => null, 'quality' => 100.0];
         }
 
-        $cavity = (int) ($machine->cavity ?? 1);
-        if ($cavity < 1) {
-            $cavity = 1;
-        }
-        $cycle = (int) ($machine->cycle_time ?? 0);
-
         [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
         $startApp = $startUtc->copy()->setTimezone($appTimezone);
         $endApp = $endUtc->copy()->setTimezone($appTimezone);
+        $nowApp = Carbon::now($appTimezone);
+        $effectiveEndApp = $nowApp->lessThan($endApp) ? $nowApp->copy() : $endApp->copy();
+        if ($effectiveEndApp->lt($startApp)) {
+            return ['oee' => null, 'availability' => null, 'performance' => null, 'quality' => 100.0];
+        }
 
-        $qty = $this->getLatestMachineQuantityInWindow($address, $startUtc, $endUtc, $appTimezone);
-        $rh = $this->computeRunningHourSecondsForSnapshot(
-            $endApp,
+        $addressLower = strtolower($address);
+        $startStr = $startApp->format('Y-m-d H:i:s');
+        $effectiveEndStr = $effectiveEndApp->format('Y-m-d H:i:s');
+
+        $prodRows = ProductionDataHourly::query()
+            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->orderBy('snapshot_at', 'asc')
+            ->get();
+        if ($prodRows->isEmpty()) {
+            return ['oee' => null, 'availability' => null, 'performance' => null, 'quality' => 100.0];
+        }
+
+        $otSettingsForDay = $this->getOtSettingsForMachineForScheduleDay($address, $dateStr, $shift);
+        $cycleTime = max(0, (int) ($machine->cycle_time ?? 0));
+        $cavity = max(1, (int) ($machine->cavity ?? 1));
+        [$anchorTime, $anchorBoardQty] = $this->resolveQuantityHourlyAnchorBeforeShift(
+            $address,
+            $addressLower,
+            $startStr,
+            $appTimezone
+        );
+        if ($anchorTime === null) {
+            $anchorTime = $startApp->copy();
+            $anchorBoardQty = 0;
+        }
+
+        $qtySeries = $this->buildQuantityHourlyCumulativeSeries(
+            $prodRows,
+            $anchorTime,
+            $anchorBoardQty,
             $startApp,
             $shift,
             $appTimezone,
-            (bool) ($machine->ot_enabled ?? false),
-            $machine->ot_duration_type ?? null
+            $cycleTime,
+            $cavity,
+            $otSettingsForDay
         );
-        $rt = $rh;
+        if ($qtySeries === []) {
+            return ['oee' => null, 'availability' => null, 'performance' => null, 'quality' => 100.0];
+        }
 
-        $totalProduct = max(0, $qty) * $cavity;
-        $idealBoard = ($cycle > 0 && $rh > 0) ? (int) floor($rh / $cycle) * $cavity : 0;
-        $idealPerf = ($cycle > 0 && $rt > 0) ? (int) floor($rt / $cycle) * $cavity : 0;
+        $lastPoint = $qtySeries[count($qtySeries) - 1];
+        $qty = max(0, (int) ($lastPoint['quantity'] ?? 0));
+        $ideal = max(0, (int) ($lastPoint['ideal_quantity'] ?? 0));
+        $oee = $ideal > 0 ? round(($qty / $ideal) * 100, 2) : null;
 
-        $oee = ($idealBoard > 0) ? round(($totalProduct / $idealBoard) * 100, 2) : null;
-        $availability = ($rh > 0) ? round(($rt / $rh) * 100, 2) : null;
-        $performance = ($idealPerf > 0) ? round(($totalProduct / $idealPerf) * 100, 2) : null;
+        $lastApq = OeeRecordHourly::query()
+            ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->orderBy('snapshot_at', 'desc')
+            ->first(['availability_percent', 'performance_percent', 'quality_percent']);
+
+        $availability = $lastApq && $lastApq->availability_percent !== null
+            ? round((float) $lastApq->availability_percent, 2)
+            : null;
+        $performance = $lastApq && $lastApq->performance_percent !== null
+            ? round((float) $lastApq->performance_percent, 2)
+            : null;
+        $quality = $lastApq && $lastApq->quality_percent !== null
+            ? round((float) $lastApq->quality_percent, 2)
+            : 100.0;
 
         return [
             'oee' => $oee,
             'availability' => $availability,
             'performance' => $performance,
-            'quality' => 100.0,
+            'quality' => $quality,
         ];
+    }
+
+    /**
+     * Backward-compatible alias: semua pemanggil OEE akumulasi diarahkan
+     * ke logika selaras OEE per jam.
+     */
+    private function computeOeeFallbackForShiftDay(InspectionTable $machine, string $dateStr, string $shift, string $appTimezone): array
+    {
+        return $this->computeOeeAlignedForShiftDay($machine, $dateStr, $shift, $appTimezone);
     }
 
     /**
