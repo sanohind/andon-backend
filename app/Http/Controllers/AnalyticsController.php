@@ -1341,6 +1341,7 @@ class AnalyticsController extends Controller
         $m = (int) $ts->format('i');
         $s = (int) $ts->format('s');
         $secOfDay = $h * 3600 + $m * 60 + $s;
+        $graceSeconds = 5;
 
         // Pagi: mulai setelah reset malam (07:01) s.d. akhir jam 20:00 (termasuk 20:00:xx).
         $pagiStart = 7 * 3600 + 1 * 60;
@@ -1353,6 +1354,10 @@ class AnalyticsController extends Controller
             if ($secOfDay >= $pagiStart && $secOfDay <= $pagiEnd) {
                 return $ts->format('Y-m-d');
             }
+            // Antisipasi keterlambatan write beberapa detik setelah 20:01 sebelum reset counter.
+            if ($secOfDay > $pagiEnd && $secOfDay <= ($pagiEnd + $graceSeconds)) {
+                return $ts->format('Y-m-d');
+            }
             return null;
         }
 
@@ -1362,7 +1367,50 @@ class AnalyticsController extends Controller
         if ($secOfDay <= $malamEnd) {
             return $ts->copy()->subDay()->format('Y-m-d');
         }
+        // Antisipasi keterlambatan write beberapa detik setelah 07:01 sebelum reset counter.
+        if ($secOfDay > $malamEnd && $secOfDay <= ($malamEnd + $graceSeconds)) {
+            return $ts->copy()->subDay()->format('Y-m-d');
+        }
         return null;
+    }
+
+    /**
+     * Pilih quantity penutup shift yang stabil:
+     * - Jika titik terbaru > 0, langsung dipakai.
+     * - Jika titik terbaru = 0 di grace-window (indikasi reset cepat), pakai titik non-zero sebelumnya.
+     *
+     * @param \Illuminate\Support\Collection<int, object> $rowsDesc
+     */
+    private function resolveStableWindowEndQuantity($rowsDesc, Carbon $endLocal, string $timeField, string $appTimezone): int
+    {
+        if (!$rowsDesc || $rowsDesc->isEmpty()) {
+            return 0;
+        }
+
+        $latest = $rowsDesc->first();
+        $latestQty = max(0, (int) ($latest->quantity ?? 0));
+        $latestTsRaw = $latest->{$timeField} ?? null;
+        $latestTs = $latestTsRaw instanceof Carbon
+            ? $latestTsRaw->copy()->setTimezone($appTimezone)
+            : Carbon::parse((string) $latestTsRaw, $appTimezone);
+
+        if ($latestQty > 0) {
+            return $latestQty;
+        }
+
+        // Hanya fallback jika 0 terjadi setelah batas shift (window toleransi reset).
+        if ($latestTs->lessThanOrEqualTo($endLocal)) {
+            return 0;
+        }
+
+        foreach ($rowsDesc->slice(1) as $row) {
+            $qty = max(0, (int) ($row->quantity ?? 0));
+            if ($qty > 0) {
+                return $qty;
+            }
+        }
+
+        return 0;
     }
 
     /**
@@ -1841,8 +1889,9 @@ class AnalyticsController extends Controller
 
         $startLocal = $startUtc->copy()->setTimezone($appTimezone);
         $endLocal = $endUtc->copy()->setTimezone($appTimezone);
+        $graceEndLocal = $endLocal->copy()->addSeconds(5);
         $startStr = $startLocal->format('Y-m-d H:i:s');
-        $endStr = $endLocal->format('Y-m-d H:i:s');
+        $endStr = $graceEndLocal->format('Y-m-d H:i:s');
 
         // Selalu ambil dari production_data dulu (untuk history dan realtime).
         // Timestamp berisi tanggal dan jam sehingga rentang shift (pagi/malam) bisa ditentukan.
@@ -1850,23 +1899,28 @@ class AnalyticsController extends Controller
             return ProductionData::whereBetween('timestamp', [$startStr, $endStr])
                 ->orderBy('timestamp', 'desc');
         };
-        $latest = $windowBase()->where('machine_name', $normalizedAddress)->first();
-        if ($latest) {
-            return max(0, (int) $latest->quantity);
+        $rows = $windowBase()
+            ->where('machine_name', $normalizedAddress)
+            ->limit(5)
+            ->get(['timestamp', 'quantity']);
+        if ($rows->isNotEmpty()) {
+            return $this->resolveStableWindowEndQuantity($rows, $endLocal, 'timestamp', $appTimezone);
         }
-        $latest = ProductionData::whereBetween('timestamp', [$startStr, $endStr])
+        $rows = ProductionData::whereBetween('timestamp', [$startStr, $endStr])
             ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress])
             ->orderBy('timestamp', 'desc')
-            ->first();
-        if ($latest) {
-            return max(0, (int) $latest->quantity);
+            ->limit(5)
+            ->get(['timestamp', 'quantity']);
+        if ($rows->isNotEmpty()) {
+            return $this->resolveStableWindowEndQuantity($rows, $endLocal, 'timestamp', $appTimezone);
         }
-        $latest = ProductionData::whereBetween('timestamp', [$startStr, $endStr])
+        $rows = ProductionData::whereBetween('timestamp', [$startStr, $endStr])
             ->whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%'])
             ->orderBy('timestamp', 'desc')
-            ->first();
-        if ($latest) {
-            return max(0, (int) $latest->quantity);
+            ->limit(5)
+            ->get(['timestamp', 'quantity']);
+        if ($rows->isNotEmpty()) {
+            return $this->resolveStableWindowEndQuantity($rows, $endLocal, 'timestamp', $appTimezone);
         }
 
         // Fallback: production_data_hourly hanya jika production_data tidak ada record dalam window
@@ -1874,23 +1928,28 @@ class AnalyticsController extends Controller
             return ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
                 ->orderBy('snapshot_at', 'desc');
         };
-        $latest = $hourlyBase()->where('machine_name', $normalizedAddress)->first();
-        if ($latest) {
-            return max(0, (int) $latest->quantity);
+        $rows = $hourlyBase()
+            ->where('machine_name', $normalizedAddress)
+            ->limit(5)
+            ->get(['snapshot_at', 'quantity']);
+        if ($rows->isNotEmpty()) {
+            return $this->resolveStableWindowEndQuantity($rows, $endLocal, 'snapshot_at', $appTimezone);
         }
-        $latest = ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
+        $rows = ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
             ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$lowerAddress])
             ->orderBy('snapshot_at', 'desc')
-            ->first();
-        if ($latest) {
-            return max(0, (int) $latest->quantity);
+            ->limit(5)
+            ->get(['snapshot_at', 'quantity']);
+        if ($rows->isNotEmpty()) {
+            return $this->resolveStableWindowEndQuantity($rows, $endLocal, 'snapshot_at', $appTimezone);
         }
-        $latest = ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
+        $rows = ProductionDataHourly::whereBetween('snapshot_at', [$startStr, $endStr])
             ->whereRaw('LOWER(machine_name) LIKE ?', ['%' . $lowerAddress . '%'])
             ->orderBy('snapshot_at', 'desc')
-            ->first();
-        if ($latest) {
-            return max(0, (int) $latest->quantity);
+            ->limit(5)
+            ->get(['snapshot_at', 'quantity']);
+        if ($rows->isNotEmpty()) {
+            return $this->resolveStableWindowEndQuantity($rows, $endLocal, 'snapshot_at', $appTimezone);
         }
 
         return 0;
