@@ -832,40 +832,78 @@ class AnalyticsController extends Controller
         $startStr = $startApp->format('Y-m-d H:i:s');
         $effectiveEndStr = $effectiveEndApp->format('Y-m-d H:i:s');
 
-        // Quantity realtime: ambil quantity board terbaru dalam window shift (seperti Production Quantity).
-        $effectiveEndUtc = $effectiveEndApp->copy()->utc();
-        $latestBoardQty = $this->getLatestMachineQuantityInWindow($address, $startUtc, $effectiveEndUtc, $appTimezone);
-
-        // Anchor sebelum shift: supaya delta awal shift tidak membawa kumulatif shift sebelumnya.
-        [$_anchorTime, $anchorBoardQty] = $this->resolveQuantityHourlyAnchorBeforeShift(
-            $address,
-            $addressLower,
-            $startStr,
-            $appTimezone
-        );
-        $anchorBoardQty = max(0, (int) $anchorBoardQty);
-        $currBoardQty = max(0, (int) $latestBoardQty);
-        $boardDelta = ($currBoardQty >= $anchorBoardQty) ? ($currBoardQty - $anchorBoardQty) : $currBoardQty;
-
-        $cavity = max(1, (int) ($machine->cavity ?? 1));
-        $totalProduct = $boardDelta * $cavity;
-
-        // Ideal realtime: hitung running hour hingga waktu efektif.
         $cycleTime = max(0, (int) ($machine->cycle_time ?? 0));
         $otSettingsForDay = $this->getOtSettingsForMachineForScheduleDay($address, $dateStr, $shift);
-        $runningSeconds = $this->computeRunningHourSecondsForSnapshot(
-            $effectiveEndApp,
-            $startApp,
-            $shift,
-            $appTimezone,
-            (bool) ($otSettingsForDay['enabled'] ?? false),
-            $otSettingsForDay['duration_type'] ?? null
-        );
-        $idealBoard = ($cycleTime > 0 && $runningSeconds > 0)
-            ? (int) floor($runningSeconds / $cycleTime) * $cavity
-            : 0;
+        $cavity = max(1, (int) ($machine->cavity ?? 1));
 
-        $oee = $idealBoard > 0 ? round(($totalProduct / $idealBoard) * 100, 2) : null;
+        // Sumber OEE akumulasi mengikuti titik terakhir chart OEE per jam (production_data_hourly),
+        // supaya tidak "membengkak" saat counter production realtime terdampak OT yang telat dinyalakan.
+        $prodRows = ProductionDataHourly::query()
+            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->orderBy('snapshot_at', 'asc')
+            ->get();
+
+        $oee = null;
+        if ($prodRows->isNotEmpty() && $cycleTime > 0) {
+            // Anchor sebelum shift: supaya delta awal shift tidak membawa kumulatif shift sebelumnya.
+            [$anchorTime, $anchorBoardQty] = $this->resolveQuantityHourlyAnchorBeforeShift(
+                $address,
+                $addressLower,
+                $startStr,
+                $appTimezone
+            );
+            if ($anchorTime === null) {
+                $anchorTime = $startApp->copy();
+                $anchorBoardQty = 0;
+            }
+
+            $qtySeries = $this->buildQuantityHourlyCumulativeSeries(
+                $prodRows,
+                $anchorTime,
+                (int) $anchorBoardQty,
+                $startApp,
+                $shift,
+                $appTimezone,
+                $cycleTime,
+                $cavity,
+                $otSettingsForDay
+            );
+
+            $last = $qtySeries !== [] ? $qtySeries[count($qtySeries) - 1] : null;
+            $qty = $last ? max(0, (int) ($last['quantity'] ?? 0)) : 0;
+            $ideal = $last ? max(0, (int) ($last['ideal_quantity'] ?? 0)) : 0;
+            $oee = $ideal > 0 ? round(($qty / $ideal) * 100, 2) : null;
+        } else {
+            // Fallback (jika belum ada hourly snapshot): tetap hitung dari sumber realtime lama.
+            $effectiveEndUtc = $effectiveEndApp->copy()->utc();
+            $latestBoardQty = $this->getLatestMachineQuantityInWindow($address, $startUtc, $effectiveEndUtc, $appTimezone);
+
+            [$__, $anchorBoardQty] = $this->resolveQuantityHourlyAnchorBeforeShift(
+                $address,
+                $addressLower,
+                $startStr,
+                $appTimezone
+            );
+            $anchorBoardQty = max(0, (int) $anchorBoardQty);
+            $currBoardQty = max(0, (int) $latestBoardQty);
+            $boardDelta = ($currBoardQty >= $anchorBoardQty) ? ($currBoardQty - $anchorBoardQty) : $currBoardQty;
+            $totalProduct = $boardDelta * $cavity;
+
+            $runningSeconds = $this->computeRunningHourSecondsForSnapshot(
+                $effectiveEndApp,
+                $startApp,
+                $shift,
+                $appTimezone,
+                (bool) ($otSettingsForDay['enabled'] ?? false),
+                $otSettingsForDay['duration_type'] ?? null
+            );
+            $idealBoard = ($cycleTime > 0 && $runningSeconds > 0)
+                ? (int) floor($runningSeconds / $cycleTime) * $cavity
+                : 0;
+
+            $oee = $idealBoard > 0 ? round(($totalProduct / $idealBoard) * 100, 2) : null;
+        }
 
         $lastApq = OeeRecordHourly::query()
             ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
