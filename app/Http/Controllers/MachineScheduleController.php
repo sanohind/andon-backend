@@ -190,7 +190,8 @@ class MachineScheduleController extends Controller
     }
 
     /**
-     * POST create schedule for 1 week (7 days) ahead from start_date.
+     * POST create schedule for 5 consecutive days from start_date (hari kerja standar).
+     * Akhir pekan / hari tambahan bisa ditambah lewat schedule harian.
      * Constraints: 1 machine, 1 target quantity, OT always disabled.
      */
     public function storeWeek(Request $request)
@@ -222,7 +223,7 @@ class MachineScheduleController extends Controller
         $start = \Carbon\Carbon::parse($validated['start_date'])->startOfDay();
         $shift = $validated['shift'] ?? 'pagi';
         $createdOrUpdated = [];
-        for ($i = 0; $i < 7; $i++) {
+        for ($i = 0; $i < 5; $i++) {
             $date = $start->copy()->addDays($i);
             $payload = [
                 'schedule_date' => $date->format('Y-m-d'),
@@ -248,7 +249,7 @@ class MachineScheduleController extends Controller
 
         return response()->json([
             'success' => true,
-            'message' => 'Schedule 1 minggu berhasil dibuat.',
+            'message' => 'Schedule 5 hari kerja berhasil dibuat.',
             'data' => collect($createdOrUpdated)->map(function ($row) {
                 return [
                     'id' => $row->id,
