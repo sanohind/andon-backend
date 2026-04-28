@@ -375,27 +375,16 @@ class AnalyticsController extends Controller
                 $cnt = 0;
 
                 foreach ($dates as $dateStr) {
-                    $rec = OeeRecord::query()
-                        ->where('shift_date', $dateStr)
-                        ->where('shift', $shift)
-                        ->where('machine_address', $machine->address)
-                        ->first();
-
-                    if ($rec && $rec->oee_percent !== null) {
-                        $oeeSum += (float) $rec->oee_percent;
-                        $aSum += (float) ($rec->availability_percent ?? 0);
-                        $pSum += (float) ($rec->performance_percent ?? 0);
-                        $qSum += (float) ($rec->quality_percent ?? 100);
+                    // Sinkronkan OEE akumulasi dengan OEE per jam.
+                    // Jangan pakai OeeRecord::oee_percent langsung karena bisa "membengkak"
+                    // saat OT terlambat dinyalakan (beda sumber dengan hourly chart).
+                    $fb = $this->computeOeeFallbackForShiftDay($machine, $dateStr, $shift, $appTimezone);
+                    if ($fb['oee'] !== null) {
+                        $oeeSum += (float) $fb['oee'];
+                        $aSum += (float) ($fb['availability'] ?? 0);
+                        $pSum += (float) ($fb['performance'] ?? 0);
+                        $qSum += (float) ($fb['quality'] ?? 100);
                         $cnt++;
-                    } else {
-                        $fb = $this->computeOeeFallbackForShiftDay($machine, $dateStr, $shift, $appTimezone);
-                        if ($fb['oee'] !== null) {
-                            $oeeSum += $fb['oee'];
-                            $aSum += (float) ($fb['availability'] ?? 0);
-                            $pSum += (float) ($fb['performance'] ?? 0);
-                            $qSum += (float) ($fb['quality'] ?? 100);
-                            $cnt++;
-                        }
                     }
                 }
 
@@ -905,21 +894,33 @@ class AnalyticsController extends Controller
             $oee = $idealBoard > 0 ? round(($totalProduct / $idealBoard) * 100, 2) : null;
         }
 
-        $lastApq = OeeRecordHourly::query()
+        // Samakan A/P/Q dengan getOeeHourly():
+        // - availability & performance: ambil "terakhir yang non-null" dalam window
+        // - quality: default 100 jika tidak ada quality_percent non-null
+        $lastAvailability = OeeRecordHourly::query()
             ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
             ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->whereNotNull('availability_percent')
             ->orderBy('snapshot_at', 'desc')
-            ->first(['availability_percent', 'performance_percent', 'quality_percent']);
+            ->value('availability_percent');
 
-        $availability = $lastApq && $lastApq->availability_percent !== null
-            ? round((float) $lastApq->availability_percent, 2)
-            : null;
-        $performance = $lastApq && $lastApq->performance_percent !== null
-            ? round((float) $lastApq->performance_percent, 2)
-            : null;
-        $quality = $lastApq && $lastApq->quality_percent !== null
-            ? round((float) $lastApq->quality_percent, 2)
-            : 100.0;
+        $lastPerformance = OeeRecordHourly::query()
+            ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->whereNotNull('performance_percent')
+            ->orderBy('snapshot_at', 'desc')
+            ->value('performance_percent');
+
+        $lastQuality = OeeRecordHourly::query()
+            ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->whereNotNull('quality_percent')
+            ->orderBy('snapshot_at', 'desc')
+            ->value('quality_percent');
+
+        $availability = $lastAvailability !== null ? round((float) $lastAvailability, 2) : null;
+        $performance = $lastPerformance !== null ? round((float) $lastPerformance, 2) : null;
+        $quality = $lastQuality !== null ? round((float) $lastQuality, 2) : 100.0;
 
         return [
             'oee' => $oee,
