@@ -11,6 +11,7 @@ class MachineSchedule extends Model
     protected $fillable = [
         'schedule_date',
         'machine_address',
+        'part_number',
         'shift',
         'target_quantity',
         'ot_enabled',
