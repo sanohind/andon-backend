@@ -3,6 +3,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
 use App\Models\InspectionTable;
+use App\Models\MachineSchedule;
 use App\Models\ProductionData;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -409,8 +410,29 @@ class InspectionTableController extends Controller
         // Return per-table metrics: address, target_quantity, cycle_time, oee
         // target_quantity dan cycle_time sekarang dari InspectionTable
         $tables = InspectionTable::all();
+        $now = Carbon::now(config('app.timezone'));
+        $currentHour = (int) $now->format('H');
+        $isShiftMalam = ($currentHour >= 20 || $currentHour < 7);
+        $activeShift = $isShiftMalam ? 'malam' : 'pagi';
+        $activeScheduleDate = $currentHour < 7
+            ? $now->copy()->subDay()->toDateString()
+            : $now->toDateString();
 
-        $result = $tables->map(function($t){
+        $addresses = $tables->pluck('address')->filter()->values()->all();
+        $activeSchedules = MachineSchedule::query()
+            ->whereDate('schedule_date', $activeScheduleDate)
+            ->whereIn('machine_address', $addresses)
+            ->where(function ($q) use ($activeShift) {
+                $q->where('shift', $activeShift)->orWhereNull('shift');
+            })
+            ->orderByDesc(DB::raw("CASE WHEN shift = '{$activeShift}' THEN 1 ELSE 0 END"))
+            ->orderByDesc('id')
+            ->get()
+            ->unique('machine_address')
+            ->keyBy('machine_address');
+
+        $result = $tables->map(function($t) use ($activeSchedules) {
+            $schedule = $activeSchedules->get($t->address);
             $latest = ProductionData::where('machine_name', $t->address)->orderByDesc('timestamp')->first();
             $actualQty = $latest?->quantity ?? 0;
             $cycle = $t->cycle_time; // Ambil dari InspectionTable
@@ -430,6 +452,7 @@ class InspectionTableController extends Controller
                 'ot_duration_type' => $t->ot_duration_type,
                 'target_ot' => $t->target_ot !== null ? (int) $t->target_ot : null,
                 'cavity' => (int) ($t->cavity ?? 1),
+                'part_number' => $schedule?->part_number,
             ];
         })->values();
 
