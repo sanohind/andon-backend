@@ -770,15 +770,27 @@ class AnalyticsController extends Controller
             ]);
         }
 
-        $selectedDivision = trim((string) ($request->division ?? ''));
-        if ($selectedDivision !== '') {
+        // Pakai filled() agar string kosong tidak dianggap "pilih divisi" (sering bikin fallback ke divisi pertama / salah chart).
+        $requestedDivision = trim((string) ($request->input('division', '')));
+
+        if ($request->filled('division')) {
             $divisionMap = [];
             foreach ($availableDivisions as $divisionName) {
                 $divisionMap[$normalize($divisionName)] = $divisionName;
             }
-            $selectedDivision = $divisionMap[$normalize($selectedDivision)] ?? $selectedDivision;
+            $selectedDivision = $divisionMap[$normalize($requestedDivision)] ?? $requestedDivision;
+
+            // Satukan penulisan dengan nilai kanonik di inspection_tables (LOWER(TRIM) sama).
+            $canonicalDivision = InspectionTable::query()
+                ->whereNotNull('division')
+                ->whereRaw('LOWER(TRIM(division)) = ?', [$normalize($selectedDivision)])
+                ->orderBy('division')
+                ->value('division');
+            if (is_string($canonicalDivision) && $canonicalDivision !== '') {
+                $selectedDivision = $canonicalDivision;
+            }
         } else {
-            // Samakan perilaku default dengan chart Production Quantity/OEE.
+            // Tanpa filter divisi: samakan default dengan chart Production Quantity (divisi pertama urutan).
             $selectedDivision = $availableDivisions->first();
         }
         $period = $request->period;
