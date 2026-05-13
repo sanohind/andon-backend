@@ -424,6 +424,310 @@ class AnalyticsController extends Controller
     }
 
     /**
+     * Tipe problem yang dihitung sebagai downtime mesin (OEE) — dikecualikan dari "Downtime Non-Problem".
+     */
+    private function isOeeMachineDowntimeProblemType(?string $tipeProblem): bool
+    {
+        $t = strtolower(trim((string) $tipeProblem));
+
+        return in_array($t, ['machine', 'quality', 'engineering'], true);
+    }
+
+    /**
+     * Overlap detik antara [eventStart, eventEnd] dan [windowStart, windowEnd] (semua inklusif batas lembut).
+     */
+    private function overlapSecondsBetweenWindows(
+        Carbon $windowStart,
+        Carbon $windowEnd,
+        Carbon $eventStart,
+        Carbon $eventEnd
+    ): int {
+        if ($eventEnd->lessThanOrEqualTo($windowStart) || $eventStart->greaterThanOrEqualTo($windowEnd)) {
+            return 0;
+        }
+        $s = $eventStart->greaterThan($windowStart) ? $eventStart : $windowStart;
+        $e = $eventEnd->lessThan($windowEnd) ? $eventEnd : $windowEnd;
+        if ($e->lessThanOrEqualTo($s)) {
+            return 0;
+        }
+
+        return (int) $s->diffInSeconds($e);
+    }
+
+    /**
+     * Downtime Non-Problem per mesin per line — filter sama seperti Production Quantity.
+     * Akumulasi durasi log resolved yang tipe_problem BUKAN machine/quality/engineering,
+     * diiris per window shift (overlap timestamp–resolved_at).
+     */
+    public function getLineNonProblemDowntime(Request $request)
+    {
+        $request->validate([
+            'division' => 'nullable|string',
+            'period' => 'required|in:daily,monthly,yearly',
+            'date' => 'required_if:period,daily|nullable|date_format:Y-m-d',
+            'month' => 'required_if:period,monthly|nullable|date_format:Y-m',
+            'year' => 'required_if:period,yearly|nullable|date_format:Y',
+            'shift' => 'required|in:pagi,malam',
+        ]);
+
+        $availableDivisions = InspectionTable::select('division')
+            ->whereNotNull('division')
+            ->distinct()
+            ->orderBy('division')
+            ->get()
+            ->pluck('division')
+            ->filter()
+            ->values();
+
+        if ($availableDivisions->isEmpty()) {
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'divisions' => [],
+                    'division' => null,
+                    'lines' => [],
+                ],
+            ]);
+        }
+
+        $selectedDivision = $request->division ?: $availableDivisions->first();
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $period = $request->period;
+        $shift = $request->shift;
+
+        $dateRange = $this->resolveQuantityDateRange($period, $request->date, $request->month, $request->year, $appTimezone);
+        if (!$dateRange) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid date/month/year for period.',
+                'data' => ['lines' => []],
+            ], 422);
+        }
+
+        [$dates, $filterLabel, $productionDays] = $dateRange;
+
+        $linesInDivision = InspectionTable::select('line_name')
+            ->where('division', $selectedDivision)
+            ->whereNotNull('line_name')
+            ->distinct()
+            ->orderBy('line_name')
+            ->get();
+
+        $allAddresses = InspectionTable::where('division', $selectedDivision)
+            ->whereNotNull('address')
+            ->pluck('address')
+            ->map(fn ($a) => trim((string) $a))
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+
+        $minQueryStart = null;
+        $maxQueryEnd = null;
+        foreach ($dates as $dateStr) {
+            [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
+            $ws = $startUtc->copy()->setTimezone($appTimezone);
+            $we = $endUtc->copy()->setTimezone($appTimezone);
+            if ($minQueryStart === null || $ws->lessThan($minQueryStart)) {
+                $minQueryStart = $ws->copy();
+            }
+            if ($maxQueryEnd === null || $we->greaterThan($maxQueryEnd)) {
+                $maxQueryEnd = $we->copy();
+            }
+        }
+
+        $logsByAddressNorm = [];
+        if (!empty($allAddresses) && $minQueryStart && $maxQueryEnd) {
+            $bufferStart = $minQueryStart->copy()->subDay();
+            $bufferEnd = $maxQueryEnd->copy()->addDay();
+
+            $logs = Log::query()
+                ->where('status', 'OFF')
+                ->whereNotNull('resolved_at')
+                ->whereNotNull('timestamp')
+                ->where('timestamp', '<=', $bufferEnd)
+                ->where('resolved_at', '>=', $bufferStart)
+                ->where(function ($q) {
+                    $q->whereNull('tipe_problem')
+                        ->orWhereRaw('LOWER(TRIM(tipe_problem)) NOT IN (?,?,?)', ['machine', 'quality', 'engineering']);
+                })
+                ->get(['timestamp', 'resolved_at', 'tipe_mesin', 'tipe_problem', 'duration_in_seconds']);
+
+            foreach ($logs as $log) {
+                if ($this->isOeeMachineDowntimeProblemType($log->tipe_problem ?? null)) {
+                    continue;
+                }
+                $addrNorm = strtolower(trim((string) ($log->tipe_mesin ?? '')));
+                if ($addrNorm === '') {
+                    continue;
+                }
+                if (!isset($logsByAddressNorm[$addrNorm])) {
+                    $logsByAddressNorm[$addrNorm] = [];
+                }
+                $logsByAddressNorm[$addrNorm][] = $log;
+            }
+        }
+
+        $linesData = [];
+        foreach ($linesInDivision as $lineInfo) {
+            $lineName = $lineInfo->line_name;
+            $machines = InspectionTable::where('line_name', $lineName)
+                ->where('division', $selectedDivision)
+                ->whereNotNull('address')
+                ->orderBy('name')
+                ->get();
+
+            $machinesData = [];
+            foreach ($machines as $machine) {
+                $addr = trim((string) ($machine->address ?? ''));
+                if ($addr === '') {
+                    continue;
+                }
+                $addrNorm = strtolower($addr);
+                $lineLogs = $logsByAddressNorm[$addrNorm] ?? [];
+                $totalSeconds = 0;
+
+                foreach ($dates as $dateStr) {
+                    [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
+                    $winStart = $startUtc->copy()->setTimezone($appTimezone);
+                    $winEnd = $endUtc->copy()->setTimezone($appTimezone);
+
+                    foreach ($lineLogs as $log) {
+                        $tsRaw = $log->timestamp ?? null;
+                        $resRaw = $log->resolved_at ?? null;
+                        if (!$tsRaw || !$resRaw) {
+                            continue;
+                        }
+                        $eventStart = $tsRaw instanceof Carbon
+                            ? $tsRaw->copy()->setTimezone($appTimezone)
+                            : Carbon::parse((string) $tsRaw, $appTimezone);
+                        $eventEnd = $resRaw instanceof Carbon
+                            ? $resRaw->copy()->setTimezone($appTimezone)
+                            : Carbon::parse((string) $resRaw, $appTimezone);
+                        if ($eventEnd->lessThanOrEqualTo($eventStart)) {
+                            continue;
+                        }
+                        $totalSeconds += $this->overlapSecondsBetweenWindows($winStart, $winEnd, $eventStart, $eventEnd);
+                    }
+                }
+
+                $machinesData[] = [
+                    'name' => $machine->name,
+                    'address' => $machine->address,
+                    'non_problem_downtime_minutes' => round($totalSeconds / 60, 2),
+                ];
+            }
+
+            $linesData[] = [
+                'line_name' => $lineName,
+                'machines' => $machinesData,
+            ];
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'divisions' => $availableDivisions,
+                'division' => $selectedDivision,
+                'lines' => $linesData,
+                'filter' => [
+                    'period' => $period,
+                    'period_label' => $period === 'daily' ? 'Harian' : ($period === 'monthly' ? 'Bulanan' : 'Tahunan'),
+                    'shift' => $shift,
+                    'shift_label' => $shift === 'pagi' ? 'Shift Pagi' : 'Shift Malam',
+                    'filter_label' => $filterLabel,
+                    'production_days' => $productionDays,
+                    'timezone' => $appTimezone,
+                ],
+            ],
+        ]);
+    }
+
+    /**
+     * Downtime non-problem per jam untuk satu mesin (line chart saat klik bar).
+     */
+    public function getNonProblemDowntimeHourly(Request $request)
+    {
+        $request->validate([
+            'date' => 'required|date_format:Y-m-d',
+            'shift' => 'required|in:pagi,malam',
+            'machine_address' => 'required|string',
+        ]);
+
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $address = trim($request->machine_address);
+        $addrNorm = strtolower($address);
+
+        [$startUtc, $endUtc] = $this->resolveShiftWindow(
+            $request->date,
+            $request->shift,
+            $appTimezone
+        );
+        $winStart = $startUtc->copy()->setTimezone($appTimezone);
+        $winEnd = $endUtc->copy()->setTimezone($appTimezone);
+
+        $bufferStart = $winStart->copy()->subDay();
+        $bufferEnd = $winEnd->copy()->addDay();
+
+        $logs = Log::query()
+            ->where('status', 'OFF')
+            ->whereNotNull('resolved_at')
+            ->whereNotNull('timestamp')
+            ->whereRaw('LOWER(TRIM(tipe_mesin)) = ?', [$addrNorm])
+            ->where('timestamp', '<=', $bufferEnd)
+            ->where('resolved_at', '>=', $bufferStart)
+            ->where(function ($q) {
+                $q->whereNull('tipe_problem')
+                    ->orWhereRaw('LOWER(TRIM(tipe_problem)) NOT IN (?,?,?)', ['machine', 'quality', 'engineering']);
+            })
+            ->orderBy('timestamp', 'asc')
+            ->get(['timestamp', 'resolved_at', 'tipe_problem']);
+
+        $slots = [];
+        $cursor = $winStart->copy();
+        while ($cursor->lessThan($winEnd)) {
+            $slotEnd = $cursor->copy()->addHour();
+            if ($slotEnd->greaterThan($winEnd)) {
+                $slotEnd = $winEnd->copy();
+            }
+            if ($slotEnd->lessThanOrEqualTo($cursor)) {
+                break;
+            }
+            $sec = 0;
+            foreach ($logs as $log) {
+                $tsRaw = $log->timestamp ?? null;
+                $resRaw = $log->resolved_at ?? null;
+                if (!$tsRaw || !$resRaw) {
+                    continue;
+                }
+                $eventStart = $tsRaw instanceof Carbon
+                    ? $tsRaw->copy()->setTimezone($appTimezone)
+                    : Carbon::parse((string) $tsRaw, $appTimezone);
+                $eventEnd = $resRaw instanceof Carbon
+                    ? $resRaw->copy()->setTimezone($appTimezone)
+                    : Carbon::parse((string) $resRaw, $appTimezone);
+                if ($eventEnd->lessThanOrEqualTo($eventStart)) {
+                    continue;
+                }
+                $sec += $this->overlapSecondsBetweenWindows($cursor, $slotEnd, $eventStart, $eventEnd);
+            }
+
+            $slots[] = [
+                'snapshot_at' => $cursor->format('Y-m-d H:i:s'),
+                'label' => $cursor->format('d/m H:i'),
+                'downtime_minutes' => round($sec / 60, 2),
+            ];
+
+            $cursor = $slotEnd->copy();
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => $slots,
+        ]);
+    }
+
+    /**
      * Akumulasi Efisiensi (OEE) harian per line dalam satu divisi (untuk chart division view).
      * X = OEE (%), Y = tanggal.
      *
