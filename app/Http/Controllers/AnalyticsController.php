@@ -1040,11 +1040,12 @@ class AnalyticsController extends Controller
                 $otEnabled = $schedule ? (bool) $schedule->ot_enabled : false;
                 $otDurationType = $schedule ? ($schedule->ot_duration_type ?? null) : null;
 
-                $oeeRegular = $this->computeOeeSimpleInWindow($m, $dateStr, $shift, $startUtc, $endRegulerUtc, $appTimezone, false, null);
+                // Drilldown efisiensi: ideal tidak dikali cavity (menghindari lonjakan berlebihan bila cavity besar).
+                $oeeRegular = $this->computeOeeSimpleInWindow($m, $dateStr, $shift, $startUtc, $endRegulerUtc, $appTimezone, false, null, false);
                 $machineRow['regular'][$shift] = $oeeRegular;
 
                 if ($otEnabled) {
-                    $oeeOt = $this->computeOeeSimpleInWindow($m, $dateStr, $shift, $endRegulerUtc, $endUtc, $appTimezone, true, $otDurationType);
+                    $oeeOt = $this->computeOeeSimpleInWindow($m, $dateStr, $shift, $endRegulerUtc, $endUtc, $appTimezone, true, $otDurationType, false);
                     $machineRow['ot'][$shift] = $oeeOt;
                 } else {
                     $machineRow['ot'][$shift] = null;
@@ -1077,13 +1078,13 @@ class AnalyticsController extends Controller
         Carbon $endUtc,
         string $appTimezone,
         bool $otEnabled,
-        ?string $otDurationType
+        ?string $otDurationType,
+        bool $multiplyIdealByCavity = true
     ): ?float {
         $address = trim((string) ($machine->address ?? ''));
         if ($address === '') return null;
 
-        $cavity = (int) ($machine->cavity ?? 1);
-        if ($cavity < 1) $cavity = 1;
+        $cavityFactor = $multiplyIdealByCavity ? max(1, (int) ($machine->cavity ?? 1)) : 1;
         $cycle = (int) ($machine->cycle_time ?? 0);
         if ($cycle <= 0) return null;
 
@@ -1101,7 +1102,7 @@ class AnalyticsController extends Controller
         );
         if ($runningSeconds <= 0) return null;
 
-        $idealSeconds = (int) $qty * $cavity * $cycle;
+        $idealSeconds = (int) $qty * $cavityFactor * $cycle;
         $oee = ($idealSeconds / $runningSeconds) * 100.0;
         if (!is_finite($oee)) return null;
         return round(max(0.0, $oee), 2);
