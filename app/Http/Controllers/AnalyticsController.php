@@ -922,6 +922,96 @@ class AnalyticsController extends Controller
     }
 
     /**
+     * OEE untuk satu segmen dalam shift (jam reguler atau jam OT): delta quantity papan × cavity
+     * terhadap selisih running hour (dari awal shift) di ujung segmen — konsisten dengan basis dashboard.
+     */
+    private function computeOeeDrilldownSegment(
+        InspectionTable $machine,
+        string $dateStr,
+        string $shift,
+        string $appTimezone,
+        Carbon $segStartUtc,
+        Carbon $segEndUtc,
+        bool $useOtInRunningHour,
+        ?string $otDurationType
+    ): ?float {
+        $address = trim((string) ($machine->address ?? ''));
+        if ($address === '') {
+            return null;
+        }
+        $cycle = (int) ($machine->cycle_time ?? 0);
+        if ($cycle <= 0) {
+            return null;
+        }
+        $cavity = max(1, (int) ($machine->cavity ?? 1));
+
+        [$shiftStartUtc, $shiftEndUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
+        $shiftStartApp = $shiftStartUtc->copy()->setTimezone($appTimezone);
+        $shiftEndApp = $shiftEndUtc->copy()->setTimezone($appTimezone);
+        $nowApp = Carbon::now($appTimezone);
+
+        $segStartApp = $segStartUtc->copy()->setTimezone($appTimezone);
+        $segEndApp = $segEndUtc->copy()->setTimezone($appTimezone);
+        if ($segStartApp->lessThan($shiftStartApp)) {
+            $segStartApp = $shiftStartApp->copy();
+        }
+        if ($segEndApp->greaterThan($shiftEndApp)) {
+            $segEndApp = $shiftEndApp->copy();
+        }
+
+        $effEndApp = $segEndApp->copy();
+        if ($nowApp->lessThan($effEndApp)) {
+            $effEndApp = $nowApp->copy();
+        }
+        if ($effEndApp->lessThanOrEqualTo($segStartApp)) {
+            return null;
+        }
+
+        $effEndUtc = $effEndApp->copy()->utc();
+
+        $qtyStart = $segStartApp->lessThanOrEqualTo($shiftStartApp)
+            ? 0
+            : $this->getLatestMachineQuantityInWindow($address, $shiftStartUtc, $segStartUtc, $appTimezone);
+        $qtyEnd = $this->getLatestMachineQuantityInWindow($address, $shiftStartUtc, $effEndUtc, $appTimezone);
+        $deltaBoard = max(0, $qtyEnd - $qtyStart);
+        $totalProduct = $deltaBoard * $cavity;
+
+        $otType = $useOtInRunningHour ? $otDurationType : null;
+        $runAtStart = $this->computeRunningHourSecondsForSnapshot(
+            $segStartApp,
+            $shiftStartApp,
+            $shift,
+            $appTimezone,
+            $useOtInRunningHour,
+            $otType
+        );
+        $runAtEnd = $this->computeRunningHourSecondsForSnapshot(
+            $effEndApp,
+            $shiftStartApp,
+            $shift,
+            $appTimezone,
+            $useOtInRunningHour,
+            $otType
+        );
+        $runningSeconds = max(0, $runAtEnd - $runAtStart);
+        if ($runningSeconds <= 0) {
+            return null;
+        }
+
+        $ideal = (int) floor($runningSeconds / $cycle) * $cavity;
+        if ($ideal <= 0) {
+            return null;
+        }
+
+        $oee = ($totalProduct / $ideal) * 100.0;
+        if (!is_finite($oee)) {
+            return null;
+        }
+
+        return round(max(0.0, min(999.0, $oee)), 2);
+    }
+
+    /**
      * Drilldown Efisiensi: semua mesin dalam line pada tanggal tertentu.
      * Mengembalikan OEE Reguler dan OT untuk shift pagi & malam.
      *
@@ -949,21 +1039,40 @@ class AnalyticsController extends Controller
         }
         $machines = $machinesQ->get();
 
-        $addresses = $machines->pluck('address')->filter()->values()->all();
-        $scheduleRows = MachineSchedule::query()
-            ->where('schedule_date', $dateStr)
-            ->whereIn('machine_address', $addresses)
-            ->get();
+        $addressNormSet = [];
+        foreach ($machines as $m) {
+            $a = strtolower(trim((string) ($m->address ?? '')));
+            if ($a !== '') {
+                $addressNormSet[$a] = true;
+            }
+        }
+
         $scheduleMap = [];
+        $scheduleRows = MachineSchedule::query()
+            ->whereDate('schedule_date', $dateStr)
+            ->get();
         foreach ($scheduleRows as $s) {
-            $key = ($s->schedule_date ?? '') . '|' . ($s->shift ?? '') . '|' . ($s->machine_address ?? '');
+            $addrNorm = strtolower(trim((string) ($s->machine_address ?? '')));
+            if ($addrNorm === '' || !isset($addressNormSet[$addrNorm])) {
+                continue;
+            }
+            $schedDate = $s->schedule_date instanceof Carbon
+                ? $s->schedule_date->format('Y-m-d')
+                : Carbon::parse((string) $s->schedule_date, $appTimezone)->format('Y-m-d');
+            if ($schedDate !== $dateStr) {
+                continue;
+            }
+            $sh = strtolower(trim((string) ($s->shift ?? '')));
+            $key = $schedDate . '|' . $sh . '|' . $addrNorm;
             $scheduleMap[$key] = $s;
         }
 
         $rows = [];
         foreach ($machines as $m) {
             $addr = trim((string) $m->address);
-            if ($addr === '') continue;
+            if ($addr === '') {
+                continue;
+            }
 
             $machineRow = [
                 'name' => $m->name,
@@ -982,18 +1091,43 @@ class AnalyticsController extends Controller
                 [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
                 [$_, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
 
-                $scheduleKey = $dateStr . '|' . $shift . '|' . $addr;
+                $addrKey = strtolower(trim($addr));
+                $scheduleKey = $dateStr . '|' . $shift . '|' . $addrKey;
                 $schedule = $scheduleMap[$scheduleKey] ?? null;
-                $otEnabled = $schedule ? (bool) $schedule->ot_enabled : false;
-                $otDurationType = $schedule ? ($schedule->ot_duration_type ?? null) : null;
 
-                // Drilldown efisiensi: ideal tidak dikali cavity (menghindari lonjakan berlebihan bila cavity besar).
-                $oeeRegular = $this->computeOeeSimpleInWindow($m, $dateStr, $shift, $startUtc, $endRegulerUtc, $appTimezone, false, null, false);
-                $machineRow['regular'][$shift] = $oeeRegular;
+                $otFallback = $this->getOtSettingsForMachineForScheduleDay($addr, $dateStr, $shift);
+                $otEnabled = false;
+                $otDurationType = null;
+                if ($schedule !== null) {
+                    $otEnabled = filter_var($schedule->ot_enabled, FILTER_VALIDATE_BOOLEAN);
+                    $otDurationType = $schedule->ot_duration_type;
+                } else {
+                    $otEnabled = (bool) ($otFallback['enabled'] ?? false);
+                    $otDurationType = $otFallback['duration_type'] ?? null;
+                }
 
-                if ($otEnabled) {
-                    $oeeOt = $this->computeOeeSimpleInWindow($m, $dateStr, $shift, $endRegulerUtc, $endUtc, $appTimezone, true, $otDurationType, false);
-                    $machineRow['ot'][$shift] = $oeeOt;
+                $machineRow['regular'][$shift] = $this->computeOeeDrilldownSegment(
+                    $m,
+                    $dateStr,
+                    $shift,
+                    $appTimezone,
+                    $startUtc,
+                    $endRegulerUtc,
+                    false,
+                    null
+                );
+
+                if ($otEnabled && $endRegulerUtc->lessThan($endUtc)) {
+                    $machineRow['ot'][$shift] = $this->computeOeeDrilldownSegment(
+                        $m,
+                        $dateStr,
+                        $shift,
+                        $appTimezone,
+                        $endRegulerUtc,
+                        $endUtc,
+                        true,
+                        $otDurationType
+                    );
                 } else {
                     $machineRow['ot'][$shift] = null;
                 }
@@ -1015,44 +1149,6 @@ class AnalyticsController extends Controller
                 'machines' => $rows,
             ],
         ]);
-    }
-
-    private function computeOeeSimpleInWindow(
-        InspectionTable $machine,
-        string $dateStr,
-        string $shift,
-        Carbon $startUtc,
-        Carbon $endUtc,
-        string $appTimezone,
-        bool $otEnabled,
-        ?string $otDurationType,
-        bool $multiplyIdealByCavity = true
-    ): ?float {
-        $address = trim((string) ($machine->address ?? ''));
-        if ($address === '') return null;
-
-        $cavityFactor = $multiplyIdealByCavity ? max(1, (int) ($machine->cavity ?? 1)) : 1;
-        $cycle = (int) ($machine->cycle_time ?? 0);
-        if ($cycle <= 0) return null;
-
-        $startApp = $startUtc->copy()->setTimezone($appTimezone);
-        $endApp = $endUtc->copy()->setTimezone($appTimezone);
-
-        $qty = $this->getLatestMachineQuantityInWindow($address, $startUtc, $endUtc, $appTimezone);
-        $runningSeconds = $this->computeRunningHourSecondsForSnapshot(
-            $endApp,
-            $startApp,
-            $shift,
-            $appTimezone,
-            $otEnabled,
-            $otDurationType
-        );
-        if ($runningSeconds <= 0) return null;
-
-        $idealSeconds = (int) $qty * $cavityFactor * $cycle;
-        $oee = ($idealSeconds / $runningSeconds) * 100.0;
-        if (!is_finite($oee)) return null;
-        return round(max(0.0, $oee), 2);
     }
 
     /**
