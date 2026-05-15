@@ -19,6 +19,7 @@ class OeeRecordHourly extends Model
         'quality_percent',
         'runtime_seconds',
         'running_hour_seconds',
+        'cycle_time_downtime_seconds',
         'total_product',
     ];
 
@@ -30,6 +31,7 @@ class OeeRecordHourly extends Model
         'quality_percent' => 'float',
         'runtime_seconds' => 'integer',
         'running_hour_seconds' => 'integer',
+        'cycle_time_downtime_seconds' => 'integer',
         'total_product' => 'integer',
     ];
 }

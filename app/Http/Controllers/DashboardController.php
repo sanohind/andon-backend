@@ -3414,7 +3414,8 @@ class DashboardController extends Controller
      */
     public function captureOeeHourlySnapshot(): int
     {
-        $now = Carbon::now(config('app.timezone'));
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $now = Carbon::now($appTimezone);
         $request = Request::create('/', 'GET');
         $grouped = $this->getMachineStatuses($request);
 
@@ -3447,6 +3448,21 @@ class DashboardController extends Controller
 
                 $metrics = $this->computeOeeMetricsFromPrimitives($qty, $cavity, $cycle, $rt, $rh);
 
+                $addrLower = strtolower(trim($addr));
+                $shiftStartBoundary = $shiftInfo['shiftStart']->copy()->setTimezone($appTimezone);
+                $nowForPrev = $now->copy()->setTimezone($appTimezone);
+                $prevHourly = OeeRecordHourly::query()
+                    ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addrLower])
+                    ->where('snapshot_at', '>=', $shiftStartBoundary->format('Y-m-d H:i:s'))
+                    ->where('snapshot_at', '<', $nowForPrev->format('Y-m-d H:i:s'))
+                    ->orderByDesc('snapshot_at')
+                    ->first(['running_hour_seconds', 'runtime_seconds']);
+                $rhPrev = $prevHourly ? (int) ($prevHourly->running_hour_seconds ?? 0) : 0;
+                $rtPrev = $prevHourly ? (int) ($prevHourly->runtime_seconds ?? 0) : 0;
+                $deltaRh = max(0, $rh - $rhPrev);
+                $deltaRt = max(0, $rt - $rtPrev);
+                $cycleTimeDowntimeSeconds = max(0, $deltaRh - $deltaRt);
+
                 OeeRecordHourly::create([
                     'snapshot_at' => $now->copy()->format('Y-m-d H:i:s'),
                     'machine_address' => $addr,
@@ -3458,6 +3474,7 @@ class DashboardController extends Controller
                     'quality_percent' => $metrics['quality'],
                     'runtime_seconds' => $rt,
                     'running_hour_seconds' => $rh,
+                    'cycle_time_downtime_seconds' => $cycleTimeDowntimeSeconds,
                     'total_product' => $metrics['total_product'],
                 ]);
 

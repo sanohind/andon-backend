@@ -9,7 +9,7 @@ class OeeHourlySnapshotCommand extends Command
 {
     protected $signature = 'oee:hourly-snapshot';
 
-    protected $description = 'Snapshot OEE per mesin ke oee_records_hourly dan upsert oee_records (jalankan tiap jam bersama production snapshot)';
+    protected $description = 'Snapshot OEE per mesin ke oee_records_hourly (termasuk cycle_time_downtime_seconds per jam) dan upsert oee_records — jalankan tiap jam bersama production snapshot';
 
     public function handle(DashboardController $dashboard): int
     {
