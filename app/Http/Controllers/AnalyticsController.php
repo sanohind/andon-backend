@@ -2146,9 +2146,62 @@ class AnalyticsController extends Controller
             : $shiftDate->copy()->addDay()->setTime(7, 0, 0);
         $data = $this->ensureOeeHourlyEndSlotAfterShiftEnd($data, $endSlotApp, $nowApp, $appTimezone);
 
+        // Ringkasan A/P/Q untuk stacked bar: nilai terakhir non-null dalam window shift
+        // (sama pola dengan agregasi OEE line chart), bukan hanya baris terakhir deret per jam.
+        $lastAvailability = OeeRecordHourly::query()
+            ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->whereNotNull('availability_percent')
+            ->orderBy('snapshot_at', 'desc')
+            ->value('availability_percent');
+
+        $lastPerformance = OeeRecordHourly::query()
+            ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->whereNotNull('performance_percent')
+            ->orderBy('snapshot_at', 'desc')
+            ->value('performance_percent');
+
+        $lastQuality = OeeRecordHourly::query()
+            ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->whereNotNull('quality_percent')
+            ->orderBy('snapshot_at', 'desc')
+            ->value('quality_percent');
+
+        if ($lastPerformance === null) {
+            $lastPerformance = OeeRecord::query()
+                ->whereDate('shift_date', $request->date)
+                ->whereRaw('LOWER(TRIM(COALESCE(shift, \'\'))) = ?', [strtolower(trim($request->shift))])
+                ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
+                ->whereNotNull('performance_percent')
+                ->value('performance_percent');
+        }
+        if ($lastAvailability === null) {
+            $lastAvailability = OeeRecord::query()
+                ->whereDate('shift_date', $request->date)
+                ->whereRaw('LOWER(TRIM(COALESCE(shift, \'\'))) = ?', [strtolower(trim($request->shift))])
+                ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
+                ->whereNotNull('availability_percent')
+                ->value('availability_percent');
+        }
+        if ($lastQuality === null) {
+            $lastQuality = OeeRecord::query()
+                ->whereDate('shift_date', $request->date)
+                ->whereRaw('LOWER(TRIM(COALESCE(shift, \'\'))) = ?', [strtolower(trim($request->shift))])
+                ->whereRaw('LOWER(TRIM(machine_address)) = ?', [$addressLower])
+                ->whereNotNull('quality_percent')
+                ->value('quality_percent');
+        }
+
         return response()->json([
             'success' => true,
             'data' => $data,
+            'shift_apq' => [
+                'availability_percent' => $lastAvailability !== null ? round((float) $lastAvailability, 2) : null,
+                'performance_percent' => $lastPerformance !== null ? round((float) $lastPerformance, 2) : null,
+                'quality_percent' => $lastQuality !== null ? round((float) $lastQuality, 2) : 100.0,
+            ],
         ]);
     }
 
