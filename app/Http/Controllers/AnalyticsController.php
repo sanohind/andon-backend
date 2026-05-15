@@ -424,13 +424,112 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Tipe problem yang dihitung sebagai downtime mesin (OEE) — dikecualikan dari "Downtime Non-Problem".
+     * Hanya log masalah cycle time yang masuk chart "Downtime Non-Problem" (bukan machine/quality/engineering).
      */
-    private function isOeeMachineDowntimeProblemType(?string $tipeProblem): bool
+    private function isCycleTimeProblemType(?string $tipeProblem): bool
     {
-        $t = strtolower(trim((string) $tipeProblem));
+        return strtolower(trim((string) $tipeProblem)) === 'cycle time';
+    }
 
-        return in_array($t, ['machine', 'quality', 'engineering'], true);
+    /**
+     * Total detik yang tertutup oleh union interval downtime (log) di dalam [windowStart, windowEnd).
+     * Digunakan untuk cek apakah 15 menit awal shift penuh tertutup cycle time.
+     */
+    private function mergedDowntimeCoverageSecondsInWindow(
+        array $logs,
+        Carbon $windowStart,
+        Carbon $windowEnd,
+        string $appTimezone
+    ): int {
+        if ($windowEnd->lessThanOrEqualTo($windowStart)) {
+            return 0;
+        }
+        $expected = (int) $windowStart->diffInSeconds($windowEnd);
+        $segments = [];
+        foreach ($logs as $log) {
+            $tsRaw = $log->timestamp ?? null;
+            $resRaw = $log->resolved_at ?? null;
+            if (!$tsRaw || !$resRaw) {
+                continue;
+            }
+            $eventStart = $tsRaw instanceof Carbon
+                ? $tsRaw->copy()->setTimezone($appTimezone)
+                : Carbon::parse((string) $tsRaw, $appTimezone);
+            $eventEnd = $resRaw instanceof Carbon
+                ? $resRaw->copy()->setTimezone($appTimezone)
+                : Carbon::parse((string) $resRaw, $appTimezone);
+            if ($eventEnd->lessThanOrEqualTo($eventStart)) {
+                continue;
+            }
+            $overlapSec = $this->overlapSecondsBetweenWindows($windowStart, $windowEnd, $eventStart, $eventEnd);
+            if ($overlapSec <= 0) {
+                continue;
+            }
+            $s = $eventStart->greaterThan($windowStart) ? $eventStart->copy() : $windowStart->copy();
+            $e = $eventEnd->lessThan($windowEnd) ? $eventEnd->copy() : $windowEnd->copy();
+            if ($e->lessThanOrEqualTo($s)) {
+                continue;
+            }
+            $segments[] = [$s, $e];
+        }
+        if ($segments === []) {
+            return 0;
+        }
+        usort($segments, static function ($a, $b) {
+            if ($a[0]->equalTo($b[0])) {
+                return 0;
+            }
+
+            return $a[0]->lessThan($b[0]) ? -1 : 1;
+        });
+        $curS = $segments[0][0];
+        $curE = $segments[0][1];
+        $total = 0;
+        for ($i = 1, $n = count($segments); $i < $n; $i++) {
+            [$s, $e] = $segments[$i];
+            if ($s->lessThanOrEqualTo($curE)) {
+                if ($e->greaterThan($curE)) {
+                    $curE = $e->copy();
+                }
+            } else {
+                $total += (int) $curS->diffInSeconds($curE);
+                $curS = $s->copy();
+                $curE = $e->copy();
+            }
+        }
+        $total += (int) $curS->diffInSeconds($curE);
+
+        return min($total, $expected);
+    }
+
+    /**
+     * Pola tidak berproduksi: setiap mesin (address) punya downtime cycle time yang menutup
+     * seluruh interval [shiftStart, shiftStart + 15 menit] (bisa dari beberapa log berurutan).
+     * Berlaku tiap hari termasuk weekend — tidak hardcode hari libur.
+     */
+    private function shouldSuppressCycleTimeDowntimeForShiftDay(
+        array $addressesNormList,
+        array $logsByAddressNorm,
+        Carbon $shiftWindowStartApp,
+        string $appTimezone
+    ): bool {
+        if ($addressesNormList === []) {
+            return false;
+        }
+        $earlyEnd = $shiftWindowStartApp->copy()->addMinutes(15);
+        $expected = (int) $shiftWindowStartApp->diffInSeconds($earlyEnd);
+        if ($expected <= 0) {
+            return false;
+        }
+        foreach ($addressesNormList as $addrNorm) {
+            $logs = $logsByAddressNorm[$addrNorm] ?? [];
+            $covered = $this->mergedDowntimeCoverageSecondsInWindow($logs, $shiftWindowStartApp, $earlyEnd, $appTimezone);
+            if ($covered < $expected) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -456,8 +555,9 @@ class AnalyticsController extends Controller
 
     /**
      * Downtime Non-Problem per mesin per line — filter sama seperti Production Quantity.
-     * Akumulasi durasi log resolved yang tipe_problem BUKAN machine/quality/engineering,
-     * diiris per window shift (overlap timestamp–resolved_at).
+     * Hanya akumulasi durasi log resolved dengan tipe_problem cycle time (bukan machine/quality/engineering).
+     * Jika pada suatu tanggal+shift semua mesin di divisi menutup penuh 15 menit awal shift dengan downtime
+     * cycle time, dianggap tidak ada proses produksi — downtime cycle time hari itu tidak dihitung (berlaku tiap hari).
      */
     public function getLineNonProblemDowntime(Request $request)
     {
@@ -536,10 +636,17 @@ class AnalyticsController extends Controller
             }
         }
 
+        $addressesNormList = array_values(array_unique(array_map(
+            static fn ($a) => strtolower(trim((string) $a)),
+            $allAddresses
+        )));
+
         $logsByAddressNorm = [];
-        if (!empty($allAddresses) && $minQueryStart && $maxQueryEnd) {
+        if ($addressesNormList !== [] && $minQueryStart && $maxQueryEnd) {
             $bufferStart = $minQueryStart->copy()->subDay();
             $bufferEnd = $maxQueryEnd->copy()->addDay();
+
+            $placeholders = implode(',', array_fill(0, count($addressesNormList), '?'));
 
             $logs = Log::query()
                 ->where('status', 'OFF')
@@ -547,14 +654,12 @@ class AnalyticsController extends Controller
                 ->whereNotNull('timestamp')
                 ->where('timestamp', '<=', $bufferEnd)
                 ->where('resolved_at', '>=', $bufferStart)
-                ->where(function ($q) {
-                    $q->whereNull('tipe_problem')
-                        ->orWhereRaw('LOWER(TRIM(tipe_problem)) NOT IN (?,?,?)', ['machine', 'quality', 'engineering']);
-                })
+                ->whereRaw('LOWER(TRIM(tipe_problem)) = ?', ['cycle time'])
+                ->whereRaw('LOWER(TRIM(tipe_mesin)) IN (' . $placeholders . ')', $addressesNormList)
                 ->get(['timestamp', 'resolved_at', 'tipe_mesin', 'tipe_problem', 'duration_in_seconds']);
 
             foreach ($logs as $log) {
-                if ($this->isOeeMachineDowntimeProblemType($log->tipe_problem ?? null)) {
+                if (!$this->isCycleTimeProblemType($log->tipe_problem ?? null)) {
                     continue;
                 }
                 $addrNorm = strtolower(trim((string) ($log->tipe_mesin ?? '')));
@@ -566,6 +671,18 @@ class AnalyticsController extends Controller
                 }
                 $logsByAddressNorm[$addrNorm][] = $log;
             }
+        }
+
+        $suppressByDate = [];
+        foreach ($dates as $dateStr) {
+            [$startUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
+            $winStartApp = $startUtc->copy()->setTimezone($appTimezone);
+            $suppressByDate[$dateStr] = $this->shouldSuppressCycleTimeDowntimeForShiftDay(
+                $addressesNormList,
+                $logsByAddressNorm,
+                $winStartApp,
+                $appTimezone
+            );
         }
 
         $linesData = [];
@@ -591,6 +708,10 @@ class AnalyticsController extends Controller
                     [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
                     $winStart = $startUtc->copy()->setTimezone($appTimezone);
                     $winEnd = $endUtc->copy()->setTimezone($appTimezone);
+
+                    if (!empty($suppressByDate[$dateStr])) {
+                        continue;
+                    }
 
                     foreach ($lineLogs as $log) {
                         $tsRaw = $log->timestamp ?? null;
@@ -645,6 +766,7 @@ class AnalyticsController extends Controller
 
     /**
      * Downtime non-problem per jam untuk satu mesin (line chart saat klik bar).
+     * Sumber data: hanya log tipe_problem cycle time; pola suppress per divisi sama dengan chart agregat.
      */
     public function getNonProblemDowntimeHourly(Request $request)
     {
@@ -669,19 +791,67 @@ class AnalyticsController extends Controller
         $bufferStart = $winStart->copy()->subDay();
         $bufferEnd = $winEnd->copy()->addDay();
 
-        $logs = Log::query()
-            ->where('status', 'OFF')
-            ->whereNotNull('resolved_at')
-            ->whereNotNull('timestamp')
-            ->whereRaw('LOWER(TRIM(tipe_mesin)) = ?', [$addrNorm])
-            ->where('timestamp', '<=', $bufferEnd)
-            ->where('resolved_at', '>=', $bufferStart)
-            ->where(function ($q) {
-                $q->whereNull('tipe_problem')
-                    ->orWhereRaw('LOWER(TRIM(tipe_problem)) NOT IN (?,?,?)', ['machine', 'quality', 'engineering']);
-            })
-            ->orderBy('timestamp', 'asc')
-            ->get(['timestamp', 'resolved_at', 'tipe_problem']);
+        $division = InspectionTable::query()
+            ->whereRaw('LOWER(TRIM(address)) = ?', [$addrNorm])
+            ->value('division');
+
+        $divisionAddresses = [];
+        if (is_string($division) && $division !== '') {
+            $divisionAddresses = InspectionTable::where('division', $division)
+                ->whereNotNull('address')
+                ->pluck('address')
+                ->map(fn ($a) => trim((string) $a))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all();
+        }
+        if ($divisionAddresses === []) {
+            $divisionAddresses = [$address];
+        }
+
+        $addressesNormList = array_values(array_unique(array_map(
+            static fn ($a) => strtolower(trim((string) $a)),
+            $divisionAddresses
+        )));
+
+        $logsByAddressNorm = [];
+        if ($addressesNormList !== []) {
+            $placeholders = implode(',', array_fill(0, count($addressesNormList), '?'));
+            $logsAll = Log::query()
+                ->where('status', 'OFF')
+                ->whereNotNull('resolved_at')
+                ->whereNotNull('timestamp')
+                ->where('timestamp', '<=', $bufferEnd)
+                ->where('resolved_at', '>=', $bufferStart)
+                ->whereRaw('LOWER(TRIM(tipe_problem)) = ?', ['cycle time'])
+                ->whereRaw('LOWER(TRIM(tipe_mesin)) IN (' . $placeholders . ')', $addressesNormList)
+                ->orderBy('timestamp', 'asc')
+                ->get(['timestamp', 'resolved_at', 'tipe_problem', 'tipe_mesin']);
+
+            foreach ($logsAll as $log) {
+                if (!$this->isCycleTimeProblemType($log->tipe_problem ?? null)) {
+                    continue;
+                }
+                $aNorm = strtolower(trim((string) ($log->tipe_mesin ?? '')));
+                if ($aNorm === '') {
+                    continue;
+                }
+                if (!isset($logsByAddressNorm[$aNorm])) {
+                    $logsByAddressNorm[$aNorm] = [];
+                }
+                $logsByAddressNorm[$aNorm][] = $log;
+            }
+        }
+
+        $logs = $logsByAddressNorm[$addrNorm] ?? [];
+
+        $suppressed = $this->shouldSuppressCycleTimeDowntimeForShiftDay(
+            $addressesNormList,
+            $logsByAddressNorm,
+            $winStart,
+            $appTimezone
+        );
 
         $slots = [];
         $cursor = $winStart->copy();
@@ -694,22 +864,24 @@ class AnalyticsController extends Controller
                 break;
             }
             $sec = 0;
-            foreach ($logs as $log) {
-                $tsRaw = $log->timestamp ?? null;
-                $resRaw = $log->resolved_at ?? null;
-                if (!$tsRaw || !$resRaw) {
-                    continue;
+            if (!$suppressed) {
+                foreach ($logs as $log) {
+                    $tsRaw = $log->timestamp ?? null;
+                    $resRaw = $log->resolved_at ?? null;
+                    if (!$tsRaw || !$resRaw) {
+                        continue;
+                    }
+                    $eventStart = $tsRaw instanceof Carbon
+                        ? $tsRaw->copy()->setTimezone($appTimezone)
+                        : Carbon::parse((string) $tsRaw, $appTimezone);
+                    $eventEnd = $resRaw instanceof Carbon
+                        ? $resRaw->copy()->setTimezone($appTimezone)
+                        : Carbon::parse((string) $resRaw, $appTimezone);
+                    if ($eventEnd->lessThanOrEqualTo($eventStart)) {
+                        continue;
+                    }
+                    $sec += $this->overlapSecondsBetweenWindows($cursor, $slotEnd, $eventStart, $eventEnd);
                 }
-                $eventStart = $tsRaw instanceof Carbon
-                    ? $tsRaw->copy()->setTimezone($appTimezone)
-                    : Carbon::parse((string) $tsRaw, $appTimezone);
-                $eventEnd = $resRaw instanceof Carbon
-                    ? $resRaw->copy()->setTimezone($appTimezone)
-                    : Carbon::parse((string) $resRaw, $appTimezone);
-                if ($eventEnd->lessThanOrEqualTo($eventStart)) {
-                    continue;
-                }
-                $sec += $this->overlapSecondsBetweenWindows($cursor, $slotEnd, $eventStart, $eventEnd);
             }
 
             $slots[] = [
@@ -724,6 +896,7 @@ class AnalyticsController extends Controller
         return response()->json([
             'success' => true,
             'data' => $slots,
+            'suppressed_no_production' => $suppressed,
         ]);
     }
 
