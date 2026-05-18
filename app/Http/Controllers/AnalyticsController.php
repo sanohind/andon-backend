@@ -1143,7 +1143,110 @@ class AnalyticsController extends Controller
         $lineName = $request->line_name;
         $dateStr = $request->date;
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $rows = $this->buildEfficiencyDrilldownMachines($division, $lineName, $dateStr, $appTimezone);
 
+        $setting = OeeSetting::first();
+        $target = $setting && $setting->target_efficiency_percent !== null ? (float) $setting->target_efficiency_percent : 96.0;
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'division' => $division,
+                'line_name' => $lineName,
+                'date' => $dateStr,
+                'target_efficiency_percent' => $target,
+                'machines' => $rows,
+            ],
+        ]);
+    }
+
+    /**
+     * Export Excel: akumulasi efisiensi per line + detail per mesin (reguler & OT).
+     * Query: division(optional), period(monthly|yearly), month, year
+     */
+    public function getEfficiencyExport(Request $request)
+    {
+        $request->validate([
+            'division' => 'nullable|string',
+            'period' => 'required|in:monthly,yearly',
+            'month' => 'required_if:period,monthly|nullable|date_format:Y-m',
+            'year' => 'required_if:period,yearly|nullable|date_format:Y',
+        ]);
+
+        $dailyResponse = $this->getDivisionEfficiencyDaily($request);
+        $dailyPayload = $dailyResponse->getData(true);
+        if (!($dailyPayload['success'] ?? false)) {
+            return $dailyResponse;
+        }
+
+        $data = $dailyPayload['data'] ?? [];
+        $dates = $data['dates'] ?? [];
+        $lines = $data['lines'] ?? [];
+        $period = $request->period;
+        $division = $data['division'] ?? $request->division;
+        $target = $data['target_efficiency_percent'] ?? 96.0;
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+
+        $accumulation = [];
+        foreach ($lines as $line) {
+            $lineName = $line['line_name'] ?? '';
+            foreach ($line['daily'] ?? [] as $dayRow) {
+                $accumulation[] = [
+                    'line_name' => $lineName,
+                    'period_label' => $dayRow['date'] ?? '',
+                    'oee_percent' => $dayRow['oee_percent'] ?? null,
+                ];
+            }
+        }
+
+        $machineDetails = [];
+        foreach ($lines as $line) {
+            $lineName = trim((string) ($line['line_name'] ?? ''));
+            if ($lineName === '') {
+                continue;
+            }
+            foreach ($line['daily'] ?? [] as $dayRow) {
+                $periodLabel = (string) ($dayRow['date'] ?? '');
+                if ($periodLabel === '') {
+                    continue;
+                }
+                $drilldownDate = $period === 'yearly'
+                    ? (preg_match('/^\d{4}-\d{2}$/', $periodLabel) ? $periodLabel . '-01' : $periodLabel)
+                    : $periodLabel;
+                if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $drilldownDate)) {
+                    continue;
+                }
+
+                $machines = $this->buildEfficiencyDrilldownMachines($division, $lineName, $drilldownDate, $appTimezone);
+                $machineDetails[] = [
+                    'line_name' => $lineName,
+                    'period_label' => $periodLabel,
+                    'date' => $drilldownDate,
+                    'machines' => $machines,
+                ];
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'division' => $division,
+                'period' => $period,
+                'month' => $request->month,
+                'year' => $request->year,
+                'target_efficiency_percent' => $target,
+                'dates' => $dates,
+                'accumulation' => $accumulation,
+                'machine_details' => $machineDetails,
+            ],
+        ]);
+    }
+
+    /**
+     * @return array<int, array{name: mixed, address: string, regular: array{pagi: mixed, malam: mixed}, ot: array{pagi: mixed, malam: mixed}}>
+     */
+    private function buildEfficiencyDrilldownMachines(?string $division, string $lineName, string $dateStr, string $appTimezone): array
+    {
         $machinesQ = InspectionTable::query()
             ->whereRaw('LOWER(TRIM(line_name)) = ?', [strtolower(trim($lineName))])
             ->whereNotNull('address')
@@ -1246,19 +1349,7 @@ class AnalyticsController extends Controller
             $rows[] = $machineRow;
         }
 
-        $setting = OeeSetting::first();
-        $target = $setting && $setting->target_efficiency_percent !== null ? (float) $setting->target_efficiency_percent : 96.0;
-
-        return response()->json([
-            'success' => true,
-            'data' => [
-                'division' => $division,
-                'line_name' => $lineName,
-                'date' => $dateStr,
-                'target_efficiency_percent' => $target,
-                'machines' => $rows,
-            ],
-        ]);
+        return $rows;
     }
 
     /**

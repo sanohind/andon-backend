@@ -35,6 +35,7 @@ Route::prefix('dashboard')->group(function () {
     Route::get('/analytics/non-problem-downtime-hourly', [AnalyticsController::class, 'getNonProblemDowntimeHourly']);
     Route::get('/analytics/efficiency-daily', [AnalyticsController::class, 'getDivisionEfficiencyDaily']);
     Route::get('/analytics/efficiency-drilldown', [AnalyticsController::class, 'getEfficiencyDrilldown']);
+    Route::get('/analytics/efficiency-export', [AnalyticsController::class, 'getEfficiencyExport']);
     Route::get('/analytics/quantity-hourly', [AnalyticsController::class, 'getQuantityHourly']);
     Route::get('/analytics/quantity-drilldown', [AnalyticsController::class, 'getQuantityDrilldown']);
     Route::get('/analytics/oee-hourly', [AnalyticsController::class, 'getOeeHourly']);
