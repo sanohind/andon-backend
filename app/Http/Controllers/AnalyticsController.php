@@ -11,6 +11,7 @@ use App\Models\ProductionData;
 use App\Models\ProductionDataHourly;
 use App\Models\OeeRecord;
 use App\Models\OeeRecordHourly;
+use App\Models\ProductionOeeSnapshotFiveMinute;
 use App\Models\BreakSchedule;
 use App\Models\MachineSchedule;
 use App\Models\OeeSetting;
@@ -2293,6 +2294,125 @@ class AnalyticsController extends Controller
                 'performance_percent' => $lastPerformance !== null ? round((float) $lastPerformance, 2) : null,
                 'quality_percent' => $lastQuality !== null ? round((float) $lastQuality, 2) : 100.0,
             ],
+        ]);
+    }
+
+    /**
+     * Produksi & ideal qty (kumulatif pcs) per titik 5 menit dalam window shift (tabel production_oee_snapshots_five_minute).
+     */
+    public function getQuantityFiveMinute(Request $request)
+    {
+        $request->validate([
+            'date' => 'required|date_format:Y-m-d',
+            'shift' => 'required|in:pagi,malam',
+            'machine_address' => 'required|string',
+        ]);
+
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $address = trim($request->machine_address);
+        $addressLower = strtolower($address);
+
+        [$startUtc, $endUtc] = $this->resolveShiftWindow(
+            $request->date,
+            $request->shift,
+            $appTimezone
+        );
+        $startApp = $startUtc->copy()->setTimezone($appTimezone);
+        $endApp = $endUtc->copy()->setTimezone($appTimezone);
+        $nowApp = Carbon::now($appTimezone);
+        $effectiveEndApp = $nowApp->lessThan($endApp) ? $nowApp->copy() : $endApp->copy();
+        if ($effectiveEndApp->lt($startApp)) {
+            return response()->json([
+                'success' => true,
+                'data' => [],
+            ]);
+        }
+
+        $startStr = $startApp->format('Y-m-d H:i:s');
+        $effectiveEndStr = $effectiveEndApp->format('Y-m-d H:i:s');
+
+        $rows = ProductionOeeSnapshotFiveMinute::query()
+            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->orderBy('snapshot_at', 'asc')
+            ->get();
+
+        $data = [];
+        foreach ($rows as $row) {
+            $snap = $row->snapshot_at instanceof Carbon
+                ? $row->snapshot_at->copy()->setTimezone($appTimezone)
+                : Carbon::parse((string) $row->snapshot_at, $appTimezone);
+            $data[] = [
+                'snapshot_at' => $snap->format('Y-m-d H:i'),
+                'label' => $snap->format('d/m H:i'),
+                'quantity' => max(0, (int) ($row->total_product ?? 0)),
+                'ideal_quantity' => max(0, (int) ($row->ideal_quantity ?? 0)),
+            ];
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => $data,
+        ]);
+    }
+
+    /**
+     * OEE & A/P/Q per titik 5 menit (sumber: production_oee_snapshots_five_minute).
+     */
+    public function getOeeFiveMinute(Request $request)
+    {
+        $request->validate([
+            'date' => 'required|date_format:Y-m-d',
+            'shift' => 'required|in:pagi,malam',
+            'machine_address' => 'required|string',
+        ]);
+
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $address = trim($request->machine_address);
+        $addressLower = strtolower($address);
+
+        [$startUtc, $endUtc] = $this->resolveShiftWindow(
+            $request->date,
+            $request->shift,
+            $appTimezone
+        );
+        $startApp = $startUtc->copy()->setTimezone($appTimezone);
+        $endApp = $endUtc->copy()->setTimezone($appTimezone);
+        $nowApp = Carbon::now($appTimezone);
+        $effectiveEndApp = $nowApp->lessThan($endApp) ? $nowApp->copy() : $endApp->copy();
+        if ($effectiveEndApp->lt($startApp)) {
+            return response()->json([
+                'success' => true,
+                'data' => [],
+            ]);
+        }
+
+        $startStr = $startApp->format('Y-m-d H:i:s');
+        $effectiveEndStr = $effectiveEndApp->format('Y-m-d H:i:s');
+
+        $rows = ProductionOeeSnapshotFiveMinute::query()
+            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->orderBy('snapshot_at', 'asc')
+            ->get();
+
+        $data = [];
+        foreach ($rows as $row) {
+            $snap = $row->snapshot_at instanceof Carbon
+                ? $row->snapshot_at->copy()->setTimezone($appTimezone)
+                : Carbon::parse((string) $row->snapshot_at, $appTimezone);
+            $data[] = [
+                'snapshot_at' => $snap->format('Y-m-d H:i'),
+                'oee_percent' => $row->oee_percent !== null ? round((float) $row->oee_percent, 2) : null,
+                'availability_percent' => $row->availability_percent !== null ? round((float) $row->availability_percent, 2) : null,
+                'performance_percent' => $row->performance_percent !== null ? round((float) $row->performance_percent, 2) : null,
+                'quality_percent' => $row->quality_percent !== null ? round((float) $row->quality_percent, 2) : 100.0,
+            ];
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => $data,
         ]);
     }
 

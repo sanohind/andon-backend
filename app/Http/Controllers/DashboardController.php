@@ -12,6 +12,7 @@ use App\Models\MachineRuntimeState;
 use App\Models\BreakSchedule;
 use App\Models\OeeRecord;
 use App\Models\OeeRecordHourly;
+use App\Models\ProductionOeeSnapshotFiveMinute;
 use App\Support\RunningHourOtExtension;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
@@ -3498,6 +3499,65 @@ class DashboardController extends Controller
                         'snapshot_at' => $now,
                     ]
                 );
+
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * Simpan snapshot gabungan produksi + ideal qty (dashboard) + OEE per 5 menit (scheduler terpisah dari per jam).
+     */
+    public function captureProductionOeeFiveMinuteSnapshot(): int
+    {
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $now = Carbon::now($appTimezone);
+        $request = Request::create('/', 'GET');
+        $grouped = $this->getMachineStatuses($request);
+
+        $cycles = InspectionTable::query()->pluck('cycle_time', 'address');
+        $divisions = InspectionTable::query()->pluck('division', 'address');
+
+        $count = 0;
+        foreach ($grouped as $lineName => $machines) {
+            foreach ($machines as $m) {
+                $addr = trim($m['machine_address'] ?? $m['address'] ?? '');
+                if ($addr === '') {
+                    continue;
+                }
+
+                $cycle = (int) ($cycles[$addr] ?? 0);
+                $cavity = max(1, (int) ($m['cavity'] ?? 1));
+                $latestProduction = ProductionData::query()
+                    ->whereRaw('LOWER(TRIM(machine_name)) = ?', [strtolower($addr)])
+                    ->orderBy('timestamp', 'desc')
+                    ->first(['quantity']);
+                $qty = $latestProduction ? (int) ($latestProduction->quantity ?? 0) : (int) ($m['quantity'] ?? 0);
+                $rt = (int) ($m['runtime_seconds'] ?? 0);
+                $rh = (int) ($m['running_hour_seconds'] ?? 0);
+
+                $metrics = $this->computeOeeMetricsFromPrimitives($qty, $cavity, $cycle, $rt, $rh);
+                $idealBoard = ($cycle > 0 && $rh > 0)
+                    ? (int) floor($rh / $cycle) * $cavity
+                    : 0;
+
+                ProductionOeeSnapshotFiveMinute::create([
+                    'snapshot_at' => $now->copy()->format('Y-m-d H:i:s'),
+                    'machine_name' => $addr,
+                    'line_name' => $m['line_name'] ?? $lineName,
+                    'division' => $divisions[$addr] ?? null,
+                    'shot_quantity' => max(0, $qty),
+                    'total_product' => (int) ($metrics['total_product'] ?? 0),
+                    'ideal_quantity' => $idealBoard,
+                    'oee_percent' => $metrics['oee'],
+                    'availability_percent' => $metrics['availability'],
+                    'performance_percent' => $metrics['performance'],
+                    'quality_percent' => $metrics['quality'],
+                    'runtime_seconds' => $rt,
+                    'running_hour_seconds' => $rh,
+                ]);
 
                 $count++;
             }
