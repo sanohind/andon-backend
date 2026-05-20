@@ -39,6 +39,7 @@ Route::prefix('dashboard')->group(function () {
     Route::get('/analytics/quantity-hourly', [AnalyticsController::class, 'getQuantityHourly']);
     Route::get('/analytics/quantity-drilldown', [AnalyticsController::class, 'getQuantityDrilldown']);
     Route::get('/analytics/oee-hourly', [AnalyticsController::class, 'getOeeHourly']);
+    Route::get('/analytics/oee-drilldown', [AnalyticsController::class, 'getOeeDrilldown']);
     Route::get('/analytics/quantity-five-minute', [AnalyticsController::class, 'getQuantityFiveMinute']);
     Route::get('/analytics/oee-five-minute', [AnalyticsController::class, 'getOeeFiveMinute']);
     Route::get('/analytics/ticketing', [AnalyticsController::class, 'getTicketingAnalyticsData']);

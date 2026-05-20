@@ -1917,6 +1917,63 @@ class AnalyticsController extends Controller
     }
 
     /**
+     * Drill-down OEE untuk klik bar chart OEE per line.
+     * - Monthly -> detail OEE per hari (selaras computeOeeFallbackForShiftDay / bar chart bulanan).
+     */
+    public function getOeeDrilldown(Request $request)
+    {
+        $request->validate([
+            'period' => 'required|in:monthly',
+            'shift' => 'required|in:pagi,malam',
+            'machine_address' => 'required|string',
+            'month' => 'required|date_format:Y-m',
+        ]);
+
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
+        $shift = $request->shift;
+        $address = trim($request->machine_address);
+        $addressLower = strtolower($address);
+
+        $machine = InspectionTable::query()
+            ->whereNotNull('address')
+            ->whereRaw('LOWER(TRIM(address)) = ?', [$addressLower])
+            ->first();
+
+        if (!$machine) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Mesin tidak ditemukan.',
+                'data' => [],
+            ], 404);
+        }
+
+        $monthStart = Carbon::parse($request->month . '-01', $appTimezone)->startOfMonth();
+        $daysInMonth = $monthStart->daysInMonth;
+        $points = [];
+
+        for ($day = 1; $day <= $daysInMonth; $day++) {
+            $dateStr = $monthStart->copy()->day($day)->format('Y-m-d');
+            $fb = $this->computeOeeFallbackForShiftDay($machine, $dateStr, $shift, $appTimezone);
+
+            $points[] = [
+                'label' => str_pad((string) $day, 2, '0', STR_PAD_LEFT),
+                'snapshot_at' => $dateStr,
+                'oee_percent' => $fb['oee'] !== null ? round((float) $fb['oee'], 2) : null,
+                'availability_percent' => $fb['availability'] !== null ? round((float) $fb['availability'], 2) : null,
+                'performance_percent' => $fb['performance'] !== null ? round((float) $fb['performance'], 2) : null,
+                'quality_percent' => $fb['quality'] !== null ? round((float) $fb['quality'], 2) : 100.0,
+            ];
+        }
+
+        return response()->json([
+            'success' => true,
+            'period' => 'monthly',
+            'granularity' => 'daily',
+            'data' => $points,
+        ]);
+    }
+
+    /**
      * Ambil qty harian per production-date dari production_data utama untuk shift tertentu.
      * Nilai yang diambil adalah quantity terbaru pada window shift per tanggal produksi.
      *
