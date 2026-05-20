@@ -3411,6 +3411,34 @@ class DashboardController extends Controller
     }
 
     /**
+     * Saat running_hour_seconds kumulatif sementara 0 (batas shift / jadwal istirahat),
+     * computeOeeMetricsFromPrimitives mengembalikan availability null sehingga histori hourly terlihat "kosong".
+     * Isi dari delta jam bila memungkinkan, atau carry nilai snapshot sebelumnya dalam shift yang sama.
+     *
+     * @param  array{oee: ?float, availability: ?float, performance: ?float, quality: float, total_product: int}  $metrics
+     * @param  object|null  $prevRow  baris sebelumnya (availability_percent, performance_percent)
+     * @return array{oee: ?float, availability: ?float, performance: ?float, quality: float, total_product: int}
+     */
+    private function stabilizeApqMetricsFromDeltasAndPrevious(
+        array $metrics,
+        int $deltaRt,
+        int $deltaRh,
+        $prevRow
+    ): array {
+        if ($metrics['availability'] === null && $deltaRh > 0) {
+            $metrics['availability'] = round(min(100, max(0, ($deltaRt / $deltaRh) * 100)), 2);
+        }
+        if ($metrics['availability'] === null && $prevRow && $prevRow->availability_percent !== null) {
+            $metrics['availability'] = round((float) $prevRow->availability_percent, 2);
+        }
+        if ($metrics['performance'] === null && $prevRow && $prevRow->performance_percent !== null) {
+            $metrics['performance'] = round((float) $prevRow->performance_percent, 2);
+        }
+
+        return $metrics;
+    }
+
+    /**
      * Simpan snapshot OEE per jam untuk semua mesin (scheduler / artisan oee:hourly-snapshot).
      */
     public function captureOeeHourlySnapshot(): int
@@ -3457,12 +3485,14 @@ class DashboardController extends Controller
                     ->where('snapshot_at', '>=', $shiftStartBoundary->format('Y-m-d H:i:s'))
                     ->where('snapshot_at', '<', $nowForPrev->format('Y-m-d H:i:s'))
                     ->orderByDesc('snapshot_at')
-                    ->first(['running_hour_seconds', 'runtime_seconds']);
+                    ->first(['running_hour_seconds', 'runtime_seconds', 'availability_percent', 'performance_percent']);
                 $rhPrev = $prevHourly ? (int) ($prevHourly->running_hour_seconds ?? 0) : 0;
                 $rtPrev = $prevHourly ? (int) ($prevHourly->runtime_seconds ?? 0) : 0;
                 $deltaRh = max(0, $rh - $rhPrev);
                 $deltaRt = max(0, $rt - $rtPrev);
                 $cycleTimeDowntimeSeconds = max(0, $deltaRh - $deltaRt);
+
+                $metrics = $this->stabilizeApqMetricsFromDeltasAndPrevious($metrics, $deltaRt, $deltaRh, $prevHourly);
 
                 OeeRecordHourly::create([
                     'snapshot_at' => $now->copy()->format('Y-m-d H:i:s'),
@@ -3516,6 +3546,9 @@ class DashboardController extends Controller
         $now = Carbon::now($appTimezone);
         $request = Request::create('/', 'GET');
         $grouped = $this->getMachineStatuses($request);
+        $shiftInfo = $this->getShiftInfo($now);
+        $shiftStartBoundary = $shiftInfo['shiftStart']->copy()->setTimezone($appTimezone);
+        $nowForPrev = $now->copy()->setTimezone($appTimezone);
 
         $cycles = InspectionTable::query()->pluck('cycle_time', 'address');
         $divisions = InspectionTable::query()->pluck('division', 'address');
@@ -3539,6 +3572,20 @@ class DashboardController extends Controller
                 $rh = (int) ($m['running_hour_seconds'] ?? 0);
 
                 $metrics = $this->computeOeeMetricsFromPrimitives($qty, $cavity, $cycle, $rt, $rh);
+
+                $addrLower = strtolower(trim($addr));
+                $prevSnap = ProductionOeeSnapshotFiveMinute::query()
+                    ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addrLower])
+                    ->where('snapshot_at', '>=', $shiftStartBoundary->format('Y-m-d H:i:s'))
+                    ->where('snapshot_at', '<', $nowForPrev->format('Y-m-d H:i:s'))
+                    ->orderByDesc('snapshot_at')
+                    ->first(['running_hour_seconds', 'runtime_seconds', 'availability_percent', 'performance_percent']);
+                $rhPrev = $prevSnap ? (int) ($prevSnap->running_hour_seconds ?? 0) : 0;
+                $rtPrev = $prevSnap ? (int) ($prevSnap->runtime_seconds ?? 0) : 0;
+                $deltaRh = max(0, $rh - $rhPrev);
+                $deltaRt = max(0, $rt - $rtPrev);
+                $metrics = $this->stabilizeApqMetricsFromDeltasAndPrevious($metrics, $deltaRt, $deltaRh, $prevSnap);
+
                 $idealBoard = ($cycle > 0 && $rh > 0)
                     ? (int) floor($rh / $cycle) * $cavity
                     : 0;
