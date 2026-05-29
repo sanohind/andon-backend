@@ -13,6 +13,7 @@ use App\Models\BreakSchedule;
 use App\Models\OeeRecord;
 use App\Models\OeeRecordHourly;
 use App\Models\ProductionOeeSnapshotFiveMinute;
+use App\Support\ProductionShiftInfo;
 use App\Support\RunningHourOtExtension;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
@@ -1006,50 +1007,14 @@ class DashboardController extends Controller
     }
 
     /**
-     * Tentukan info shift (pagi/malam) dan waktu mulai shift berdasarkan waktu sekarang.
-     * Shift pagi: 07:00-19:59, shift malam: 20:00-06:59 (next day)
+     * Tentukan info shift (pagi/malam) dan waktu reset dashboard production.
+     * Reset Ideal-Qty, Run Time, dan Running Hour pada work_start (break_schedules) + 30 detik.
      */
     private function getShiftInfo(Carbon $now): array
     {
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
-        $now = $now->copy()->setTimezone($appTimezone);
-        
-        $h = (int) $now->format('H');
-        $m = (int) $now->format('i');
-        
-        // Shift pagi: 07:00-19:59 (inclusive), shift malam: 20:00-06:59
-        $shift = 'malam';
-        if ($h >= 7 && $h < 20) {
-            $shift = 'pagi';
-        } elseif ($h === 6 && $m <= 59) {
-            $shift = 'malam';
-        } elseif ($h < 7) {
-            $shift = 'malam';
-        } elseif ($h >= 20) {
-            $shift = 'malam';
-        }
-        
-        $shiftStart = $now->copy();
-        if ($shift === 'pagi') {
-            $shiftStart->setTime(7, 0, 0);
-        } else {
-            // malam starts at 20:00 of "shift start date"
-            if ($h < 7) {
-                // after midnight before 07:00 -> shift started yesterday 20:00
-                $shiftStart->subDay()->setTime(20, 0, 0);
-            } else {
-                // 20:00-23:59 -> starts today 20:00
-                $shiftStart->setTime(20, 0, 0);
-            }
-        }
-        
-        $shiftKey = $shiftStart->format('Y-m-d') . '_' . $shift . '_' . $shiftStart->format('Hi');
-        
-        return [
-            'shift' => $shift,
-            'shiftStart' => $shiftStart,
-            'shiftKey' => $shiftKey,
-        ];
+
+        return ProductionShiftInfo::resolve($now, $appTimezone);
     }
 
     /**

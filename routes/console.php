@@ -25,7 +25,7 @@ Schedule::command('production-oee:five-minute-snapshot')
 
 // Terapkan schedule ke inspection_tables:
 // - Shift pagi: jalan tiap jam dalam window jam 07:00–19:59
-// - Shift malam: jalan tiap jam dalam window jam 21:00–06:59
+// - Shift malam: jalan tiap jam dalam window jam 20:00–06:59
 Schedule::command('schedule:apply-daily', ['--shift' => 'pagi'])
     ->hourly()
     ->timezone(config('app.timezone', 'Asia/Jakarta'))
@@ -44,7 +44,7 @@ Schedule::command('schedule:apply-daily', ['--shift' => 'malam'])
     ->when(function () {
         $now = Carbon::now(config('app.timezone', 'Asia/Jakarta'));
         $hour = (int) $now->format('H');
-        // Window shift malam: 21:00–06:59
+        // Window shift malam: 20:00–06:59
         return $hour >= 20 || $hour < 7;
     })
     ->withoutOverlapping()
