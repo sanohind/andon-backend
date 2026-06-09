@@ -4,7 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Models\MachineSchedule;
 use App\Models\InspectionTable;
-use App\Models\PartConfiguration;
 use Illuminate\Http\Request;
 
 class MachineScheduleController extends Controller
@@ -88,16 +87,13 @@ class MachineScheduleController extends Controller
         if ($request->filled('machine_address')) {
             $query->where('machine_address', $request->machine_address);
         }
-        if ($request->filled('part_number')) {
-            $query->where('part_number', $request->part_number);
-        }
         if ($request->filled('line_name')) {
             $lineName = (string) $request->line_name;
             $query->whereExists(function ($sub) use ($lineName) {
                 $sub->selectRaw('1')
-                    ->from('part_configurations')
-                    ->whereColumn('part_configurations.part_number', 'machine_schedules.part_number')
-                    ->where('part_configurations.line_name', $lineName);
+                    ->from('inspection_tables')
+                    ->whereColumn('inspection_tables.address', 'machine_schedules.machine_address')
+                    ->where('inspection_tables.line_name', $lineName);
             });
         }
 
@@ -117,13 +113,10 @@ class MachineScheduleController extends Controller
         $addresses = $paginated->pluck('machine_address')->unique()->values()->all();
         $machines = InspectionTable::whereIn('address', $addresses)->get()->keyBy('address');
 
-        $partNumbers = $paginated->pluck('part_number')->filter()->unique()->values()->all();
-        $parts = PartConfiguration::whereIn('part_number', $partNumbers)->get()->keyBy('part_number');
         $today = now()->startOfDay();
-        $data = $paginated->getCollection()->map(function ($row) use ($machines, $parts, $today) {
+        $data = $paginated->getCollection()->map(function ($row) use ($machines, $today) {
             $machine = $machines->get($row->machine_address);
             $machineName = $machine ? $machine->name : $row->machine_address;
-            $part = $row->part_number ? $parts->get($row->part_number) : null;
             $scheduleDate = $row->schedule_date->startOfDay();
             // Persist status: if date has passed and still open, update to closed so data never "disappears"
             $status = $row->status ?? 'open';
@@ -136,7 +129,7 @@ class MachineScheduleController extends Controller
                 'schedule_date' => $row->schedule_date->format('Y-m-d'),
                 'machine_address' => $row->machine_address,
                 'part_number' => $row->part_number,
-                'line_name' => $part ? $part->line_name : null,
+                'line_name' => $machine ? $machine->line_name : null,
                 'shift' => $row->shift ?? 'pagi',
                 'machine_name' => $machineName,
                 'target_quantity' => $row->target_quantity,
@@ -173,7 +166,7 @@ class MachineScheduleController extends Controller
 
         $validated = $request->validate([
             'schedule_date' => 'required|date',
-            'part_number' => 'required|string|max:255|exists:part_configurations,part_number',
+            'part_number' => 'nullable|string|max:255',
             'machine_address' => 'nullable|string|max:20',
             'machine_addresses' => 'nullable|array|min:1',
             'machine_addresses.*' => 'required|string|max:20',
@@ -193,10 +186,6 @@ class MachineScheduleController extends Controller
         }
         $machineAddresses = collect($machineAddresses)->filter()->unique()->values()->all();
 
-        $part = PartConfiguration::where('part_number', $validated['part_number'])->first();
-        if (!$part) {
-            return response()->json(['success' => false, 'message' => 'Part number tidak ditemukan.'], 422);
-        }
         $allowedMachines = $this->resolveAllowedMachines($ctx, $role);
         if ($allowedMachines === null) {
             return response()->json(['success' => false, 'message' => 'Akses Ditolak'], 403);
@@ -211,11 +200,9 @@ class MachineScheduleController extends Controller
             if (!in_array((string) $addr, $allowedMachines, true)) {
                 return response()->json(['success' => false, 'message' => "Mesin tidak diizinkan: {$addr}"], 403);
             }
-            if ((string) ($machine->line_name ?? '') !== (string) ($part->line_name ?? '')) {
-                return response()->json(['success' => false, 'message' => "Part Number {$validated['part_number']} hanya bisa dipakai untuk line {$part->line_name}."], 422);
-            }
         }
 
+        $validated['part_number'] = null;
         $inputShift = strtolower((string) ($validated['shift'] ?? 'pagi'));
         $shiftsToCreate = $inputShift === 'semua' ? ['pagi', 'malam'] : [$inputShift];
         $validated['ot_enabled'] = filter_var($validated['ot_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN);
@@ -270,7 +257,7 @@ class MachineScheduleController extends Controller
 
         $validated = $request->validate([
             'start_date' => 'required|date',
-            'part_number' => 'required|string|max:255|exists:part_configurations,part_number',
+            'part_number' => 'nullable|string|max:255',
             'machine_address' => 'nullable|string|max:20',
             'machine_addresses' => 'nullable|array|min:1',
             'machine_addresses.*' => 'required|string|max:20',
@@ -287,10 +274,6 @@ class MachineScheduleController extends Controller
         }
         $machineAddresses = collect($machineAddresses)->filter()->unique()->values()->all();
 
-        $part = PartConfiguration::where('part_number', $validated['part_number'])->first();
-        if (!$part) {
-            return response()->json(['success' => false, 'message' => 'Part number tidak ditemukan.'], 422);
-        }
         $allowedMachines = $this->resolveAllowedMachines($ctx, $role);
         if ($allowedMachines === null) {
             return response()->json(['success' => false, 'message' => 'Akses Ditolak'], 403);
@@ -303,9 +286,6 @@ class MachineScheduleController extends Controller
             }
             if (!in_array((string) $addr, $allowedMachines, true)) {
                 return response()->json(['success' => false, 'message' => "Mesin tidak diizinkan: {$addr}"], 403);
-            }
-            if ((string) ($machine->line_name ?? '') !== (string) ($part->line_name ?? '')) {
-                return response()->json(['success' => false, 'message' => "Part Number {$validated['part_number']} hanya bisa dipakai untuk line {$part->line_name}."], 422);
             }
         }
 
@@ -320,7 +300,7 @@ class MachineScheduleController extends Controller
                     $payload = [
                         'schedule_date' => $date->format('Y-m-d'),
                         'machine_address' => $addr,
-                        'part_number' => $validated['part_number'],
+                        'part_number' => null,
                         'shift' => $shift,
                         'target_quantity' => (int) $validated['target_quantity'],
                         'ot_enabled' => false,
@@ -389,7 +369,6 @@ class MachineScheduleController extends Controller
         $validated = $request->validate([
             'schedule_date' => 'sometimes|date',
             'machine_address' => 'sometimes|string|max:20',
-            'part_number' => 'sometimes|required|string|max:255|exists:part_configurations,part_number',
             'shift' => 'nullable|string|in:pagi,malam',
             'target_quantity' => 'sometimes|integer|min:0',
             'ot_enabled' => 'nullable',
@@ -404,19 +383,6 @@ class MachineScheduleController extends Controller
                 return response()->json(['success' => false, 'message' => 'Akses Ditolak'], 403);
             }
         }
-        $candidateMachineAddress = $validated['machine_address'] ?? $schedule->machine_address;
-        $candidatePartNumber = $validated['part_number'] ?? $schedule->part_number;
-        if ($candidatePartNumber) {
-            $part = PartConfiguration::where('part_number', $candidatePartNumber)->first();
-            $machine = InspectionTable::where('address', $candidateMachineAddress)->first();
-            if (!$part || !$machine) {
-                return response()->json(['success' => false, 'message' => 'Part atau mesin tidak valid.'], 422);
-            }
-            if ((string) ($machine->line_name ?? '') !== (string) ($part->line_name ?? '')) {
-                return response()->json(['success' => false, 'message' => "Part Number {$candidatePartNumber} hanya bisa dipakai untuk line {$part->line_name}."], 422);
-            }
-        }
-
         if (isset($validated['ot_enabled'])) {
             $validated['ot_enabled'] = filter_var($validated['ot_enabled'], FILTER_VALIDATE_BOOLEAN);
         }
