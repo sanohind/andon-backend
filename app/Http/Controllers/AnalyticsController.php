@@ -302,7 +302,7 @@ class AnalyticsController extends Controller
 
     /**
      * OEE per mesin per line — filter tanggal/shift/divisi sama seperti Production Quantity.
-     * Logika diselaraskan dengan endpoint OEE per jam (basis quantity/ideal dari production hourly).
+     * Logika diselaraskan dengan chart OEE per 5 menit (bar chart akumulasi dari snapshot 5 menit).
      */
     public function getLineOeeComparison(Request $request)
     {
@@ -376,9 +376,7 @@ class AnalyticsController extends Controller
                 $cnt = 0;
 
                 foreach ($dates as $dateStr) {
-                    // Sinkronkan OEE akumulasi dengan OEE per jam.
-                    // Jangan pakai OeeRecord::oee_percent langsung karena bisa "membengkak"
-                    // saat OT terlambat dinyalakan (beda sumber dengan hourly chart).
+                    // OEE akumulasi bar chart: snapshot 5 menit terakhir per shift-day.
                     $fb = $this->computeOeeFallbackForShiftDay($machine, $dateStr, $shift, $appTimezone);
                     if ($fb['oee'] !== null) {
                         $oeeSum += (float) $fb['oee'];
@@ -946,20 +944,22 @@ class AnalyticsController extends Controller
         $effectiveEndApp = $nowApp->lessThan($endApp) ? $nowApp->copy() : $endApp->copy();
 
         $addressLower = strtolower($address);
-        $startStr = $startApp->format('Y-m-d H:i:s');
-        $effectiveEndStr = $effectiveEndApp->format('Y-m-d H:i:s');
 
         $cycleTime = max(0, (int) ($machine->cycle_time ?? 0));
         $otSettingsForDay = $this->getOtSettingsForMachineForScheduleDay($address, $dateStr, $shift);
         $cavity = max(1, (int) ($machine->cavity ?? 1));
 
-        $prodRows = ProductionDataHourly::query()
-            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
-            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
-            ->orderBy('snapshot_at', 'asc')
-            ->get();
+        $qtySeries = $this->resolveQuantityHourlySeriesForShift(
+            $address,
+            $addressLower,
+            $startApp,
+            $effectiveEndApp,
+            $shift,
+            $appTimezone,
+            $otSettingsForDay
+        );
 
-        if ($prodRows->isEmpty() || $cycleTime <= 0) {
+        if ($qtySeries === [] || $cycleTime <= 0) {
             return [
                 'series' => [],
                 'shift_start_app' => $startApp,
@@ -970,29 +970,6 @@ class AnalyticsController extends Controller
                 'ot_settings' => $otSettingsForDay,
             ];
         }
-
-        [$anchorTime, $anchorBoardQty] = $this->resolveQuantityHourlyAnchorBeforeShift(
-            $address,
-            $addressLower,
-            $startStr,
-            $appTimezone
-        );
-        if ($anchorTime === null) {
-            $anchorTime = $startApp->copy();
-            $anchorBoardQty = 0;
-        }
-
-        $qtySeries = $this->buildQuantityHourlyCumulativeSeries(
-            $prodRows,
-            $anchorTime,
-            (int) $anchorBoardQty,
-            $startApp,
-            $shift,
-            $appTimezone,
-            $cycleTime,
-            $cavity,
-            $otSettingsForDay
-        );
 
         return [
             'series' => $qtySeries,
@@ -1354,14 +1331,9 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Hitung metrik OEE akumulasi per shift-day real-time, selaras dengan:
-     * - Chart Production Quantity (basis quantity terbaru dari production_data dalam window shift),
-     * - Chart OEE per jam (memakai anchor sebelum shift agar delta tidak terbawa shift sebelumnya).
-     *
-     * Catatan:
-     * - OEE (%) dihitung real-time dari (total_product sejak awal shift) / (ideal_qty sampai waktu efektif).
-     * - A/P/Q tetap memakai snapshot OEE hourly terakhir dalam window (karena histori runtime per menit
-     *   tidak tersedia untuk dihitung ulang setara real-time).
+     * Hitung metrik OEE akumulasi per shift-day.
+     * Sumber utama: snapshot 5 menit terakhir dalam window shift (selaras chart per 5 menit).
+     * Fallback: production_data_hourly + oee_records_hourly bila snapshot 5 menit belum tersedia.
      */
     private function computeOeeAlignedForShiftDay(InspectionTable $machine, string $dateStr, string $shift, string $appTimezone): array
     {
@@ -1387,8 +1359,13 @@ class AnalyticsController extends Controller
         $otSettingsForDay = $this->getOtSettingsForMachineForScheduleDay($address, $dateStr, $shift);
         $cavity = max(1, (int) ($machine->cavity ?? 1));
 
-        // Sumber OEE akumulasi mengikuti titik terakhir chart OEE per jam (production_data_hourly),
-        // supaya tidak "membengkak" saat counter production realtime terdampak OT yang telat dinyalakan.
+        // Sumber OEE akumulasi: snapshot 5 menit terakhir (selaras chart per 5 menit yang akurat).
+        $fiveMinMetrics = $this->resolveFiveMinuteShiftOeeMetrics($addressLower, $startStr, $effectiveEndStr);
+        if ($fiveMinMetrics !== null) {
+            return $fiveMinMetrics;
+        }
+
+        // Fallback: production_data_hourly bila belum ada snapshot 5 menit.
         $prodRows = ProductionDataHourly::query()
             ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
             ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
@@ -1493,8 +1470,7 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Backward-compatible alias: semua pemanggil OEE akumulasi diarahkan
-     * ke logika selaras OEE per jam.
+     * Backward-compatible alias: OEE akumulasi bar chart berbasis snapshot 5 menit.
      */
     private function computeOeeFallbackForShiftDay(InspectionTable $machine, string $dateStr, string $shift, string $appTimezone): array
     {
@@ -1684,13 +1660,237 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Data quantity per jam dari production_data_hourly untuk satu mesin (grafik line per jam).
-     * Query sesuai tanggal dan shift yang dipilih.
-     * Quantity & ideal per titik = nilai kumulatif sejak awal shift (garis menanjak).
-     * period_start / period_end tetap diisi (awal–akhir selang antar snapshot) untuk klasifikasi Reguler vs OT.
-     * - Pagi: reguler jam ≤15, OT jam ≥16 (sampai akhir window shift).
-     * - Malam: OT jam 5–6; selain itu reguler (termasuk jam 7 = bagian akhir shift malam).
-     * - Jika ot_enabled=false: satu seri quantity saja (tanpa split OT).
+     * Ambil snapshot 5 menit dalam window shift (sumber akurat chart per 5 menit).
+     *
+     * @return \Illuminate\Database\Eloquent\Collection<int, ProductionOeeSnapshotFiveMinute>
+     */
+    private function fetchFiveMinuteSnapshotsForMachine(
+        string $addressLower,
+        string $startStr,
+        string $endStr
+    ) {
+        return ProductionOeeSnapshotFiveMinute::query()
+            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $endStr])
+            ->orderBy('snapshot_at', 'asc')
+            ->get();
+    }
+
+    /**
+     * Agregasi snapshot 5 menit → deret per jam (ambil titik terakhir tiap jam).
+     * Quantity & ideal langsung dari kolom total_product / ideal_quantity (sama dengan chart per 5 menit).
+     *
+     * @param \Illuminate\Database\Eloquent\Collection<int, ProductionOeeSnapshotFiveMinute> $rows
+     * @return array<int, array<string, mixed>>
+     */
+    private function buildQuantityHourlySeriesFromFiveMinute(
+        $rows,
+        string $shift,
+        string $appTimezone,
+        bool $otEnabled,
+        Carbon $shiftStartApp
+    ): array {
+        $byHour = [];
+        $prevSnap = null;
+        $prevProduct = null;
+        $cumRegular = 0;
+        $cumOt = 0;
+        $prevHourlySnapshotAt = null;
+        $currentHourKey = null;
+
+        foreach ($rows as $row) {
+            $snap = $row->snapshot_at instanceof Carbon
+                ? $row->snapshot_at->copy()->setTimezone($appTimezone)
+                : Carbon::parse((string) $row->snapshot_at, $appTimezone);
+            $product = max(0, (int) ($row->total_product ?? 0));
+            $ideal = max(0, (int) ($row->ideal_quantity ?? 0));
+
+            if ($prevSnap !== null && $prevProduct !== null && $otEnabled) {
+                $delta = ($product >= $prevProduct) ? ($product - $prevProduct) : $product;
+                $hour = (int) $prevSnap->format('G');
+                $band = $this->classifyQuantityHourlyIntervalBand($shift, $hour);
+                if ($band === 'ot') {
+                    $cumOt += $delta;
+                } else {
+                    $cumRegular += $delta;
+                }
+            }
+
+            $hourKey = $snap->format('Y-m-d H');
+            if ($currentHourKey !== null && $hourKey !== $currentHourKey && isset($byHour[$currentHourKey])) {
+                $prevHourlySnapshotAt = (string) $byHour[$currentHourKey]['snapshot_at'];
+            }
+            $currentHourKey = $hourKey;
+
+            $periodStart = $prevHourlySnapshotAt ?? $shiftStartApp->format('Y-m-d H:i');
+            $entry = [
+                'period_start' => $periodStart,
+                'period_end' => $snap->format('Y-m-d H:i'),
+                'snapshot_at' => $snap->format('Y-m-d H:i'),
+                'label' => $snap->format('d/m H:i'),
+                'quantity' => $product,
+                'ideal_quantity' => $ideal,
+            ];
+            if ($otEnabled) {
+                $entry['quantity_cumulative_regular'] = (int) $cumRegular;
+                $entry['quantity_cumulative_ot'] = (int) $cumOt;
+            }
+
+            $byHour[$hourKey] = $entry;
+            $prevSnap = $snap;
+            $prevProduct = $product;
+        }
+
+        ksort($byHour);
+
+        return array_values($byHour);
+    }
+
+    /**
+     * Agregasi snapshot OEE 5 menit → deret per jam (titik terakhir tiap jam).
+     *
+     * @param \Illuminate\Database\Eloquent\Collection<int, ProductionOeeSnapshotFiveMinute> $rows
+     * @return array<int, array<string, mixed>>
+     */
+    private function buildOeeHourlySeriesFromFiveMinute($rows, string $appTimezone): array
+    {
+        $byHour = [];
+        foreach ($rows as $row) {
+            $snap = $row->snapshot_at instanceof Carbon
+                ? $row->snapshot_at->copy()->setTimezone($appTimezone)
+                : Carbon::parse((string) $row->snapshot_at, $appTimezone);
+            $hourKey = $snap->format('Y-m-d H');
+            $oee = $row->oee_percent !== null ? round((float) $row->oee_percent, 2) : null;
+            $ideal = max(0, (int) ($row->ideal_quantity ?? 0));
+            $product = max(0, (int) ($row->total_product ?? 0));
+            if ($oee === null && $ideal > 0) {
+                $oee = round(($product / $ideal) * 100, 2);
+            }
+
+            $byHour[$hourKey] = [
+                'snapshot_at' => $snap->format('Y-m-d H:i'),
+                'oee_percent' => $oee,
+                'availability_percent' => $row->availability_percent !== null
+                    ? round((float) $row->availability_percent, 2) : null,
+                'performance_percent' => $row->performance_percent !== null
+                    ? round((float) $row->performance_percent, 2) : null,
+                'quality_percent' => $row->quality_percent !== null
+                    ? round((float) $row->quality_percent, 2) : 100.0,
+            ];
+        }
+
+        ksort($byHour);
+
+        return array_values($byHour);
+    }
+
+    /**
+     * Deret quantity per jam: utamakan agregasi snapshot 5 menit; fallback ke production_data_hourly.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function resolveQuantityHourlySeriesForShift(
+        string $normalizedAddress,
+        string $addressLower,
+        Carbon $startApp,
+        Carbon $effectiveEndApp,
+        string $shift,
+        string $appTimezone,
+        array $otSettingsForDay
+    ): array {
+        $startStr = $startApp->format('Y-m-d H:i:s');
+        $effectiveEndStr = $effectiveEndApp->format('Y-m-d H:i:s');
+        $otEnabled = (bool) ($otSettingsForDay['enabled'] ?? false);
+
+        $fiveMinRows = $this->fetchFiveMinuteSnapshotsForMachine($addressLower, $startStr, $effectiveEndStr);
+        if ($fiveMinRows->isNotEmpty()) {
+            return $this->buildQuantityHourlySeriesFromFiveMinute(
+                $fiveMinRows,
+                $shift,
+                $appTimezone,
+                $otEnabled,
+                $startApp
+            );
+        }
+
+        $prodRows = ProductionDataHourly::query()
+            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->orderBy('snapshot_at', 'asc')
+            ->get();
+
+        if ($prodRows->isEmpty()) {
+            return [];
+        }
+
+        $cycleTime = $this->getCycleTimeForMachine($normalizedAddress);
+        $cavity = $this->getCavityForMachine($normalizedAddress);
+        [$anchorTime, $anchorBoardQty] = $this->resolveQuantityHourlyAnchorBeforeShift(
+            $normalizedAddress,
+            $addressLower,
+            $startStr,
+            $appTimezone
+        );
+        if ($anchorTime === null) {
+            $anchorTime = $startApp->copy();
+            $anchorBoardQty = 0;
+        }
+
+        return $this->buildQuantityHourlyCumulativeSeries(
+            $prodRows,
+            $anchorTime,
+            (int) $anchorBoardQty,
+            $startApp,
+            $shift,
+            $appTimezone,
+            $cycleTime,
+            $cavity,
+            $otSettingsForDay
+        );
+    }
+
+    /**
+     * Metrik OEE akumulasi shift dari snapshot 5 menit terakhir dalam window.
+     *
+     * @return array{oee: ?float, availability: ?float, performance: ?float, quality: float}|null
+     */
+    private function resolveFiveMinuteShiftOeeMetrics(
+        string $addressLower,
+        string $startStr,
+        string $effectiveEndStr
+    ): ?array {
+        $lastSnap = ProductionOeeSnapshotFiveMinute::query()
+            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
+            ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
+            ->orderBy('snapshot_at', 'desc')
+            ->first();
+
+        if (!$lastSnap) {
+            return null;
+        }
+
+        $oee = $lastSnap->oee_percent !== null ? round((float) $lastSnap->oee_percent, 2) : null;
+        $ideal = max(0, (int) ($lastSnap->ideal_quantity ?? 0));
+        $product = max(0, (int) ($lastSnap->total_product ?? 0));
+        if ($oee === null && $ideal > 0) {
+            $oee = round(($product / $ideal) * 100, 2);
+        }
+
+        return [
+            'oee' => $oee,
+            'availability' => $lastSnap->availability_percent !== null
+                ? round((float) $lastSnap->availability_percent, 2) : null,
+            'performance' => $lastSnap->performance_percent !== null
+                ? round((float) $lastSnap->performance_percent, 2) : null,
+            'quality' => $lastSnap->quality_percent !== null
+                ? round((float) $lastSnap->quality_percent, 2) : 100.0,
+        ];
+    }
+
+    /**
+     * Data quantity per jam untuk satu mesin (grafik line per jam).
+     * Sumber utama: agregasi snapshot 5 menit (selaras chart per 5 menit).
+     * Fallback: production_data_hourly jika snapshot 5 menit belum tersedia.
      */
     public function getQuantityHourly(Request $request)
     {
@@ -1710,7 +1910,6 @@ class AnalyticsController extends Controller
             $request->shift
         );
         $otEnabled = $otSettingsForDay['enabled'];
-        $cavity = $this->getCavityForMachine($address);
 
         [$startUtc, $endUtc] = $this->resolveShiftWindow(
             $request->date,
@@ -1719,40 +1918,16 @@ class AnalyticsController extends Controller
         );
         $startApp = $startUtc->copy()->setTimezone($appTimezone);
         $endApp = $endUtc->copy()->setTimezone($appTimezone);
-        $startStr = $startApp->format('Y-m-d H:i:s');
-        $endStr = $endApp->format('Y-m-d H:i:s');
+        $nowApp = Carbon::now($appTimezone);
+        $effectiveEndApp = $nowApp->lessThan($endApp) ? $nowApp->copy() : $endApp->copy();
 
-        // IMPORTANT:
-        // machine_name di production_data / production_data_hourly di lapangan kadang punya whitespace / case beda.
-        // Gunakan TRIM+LOWER agar hasil konsisten (tidak "kadang OT muncul, kadang hilang").
-        $rows = ProductionDataHourly::query()
-            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
-            ->whereBetween('snapshot_at', [$startStr, $endStr])
-            ->orderBy('snapshot_at', 'asc')
-            ->get();
-
-        $cycleTime = $this->getCycleTimeForMachine($address);
-
-        [$anchorTime, $anchorBoardQty] = $this->resolveQuantityHourlyAnchorBeforeShift(
+        $data = $this->resolveQuantityHourlySeriesForShift(
             $normalizedAddress,
             $addressLower,
-            $startStr,
-            $appTimezone
-        );
-        if ($anchorTime === null) {
-            $anchorTime = $startApp->copy();
-            $anchorBoardQty = 0;
-        }
-
-        $data = $this->buildQuantityHourlyCumulativeSeries(
-            $rows,
-            $anchorTime,
-            $anchorBoardQty,
             $startApp,
+            $effectiveEndApp,
             $request->shift,
             $appTimezone,
-            $cycleTime,
-            $cavity,
             $otSettingsForDay
         );
 
@@ -1796,37 +1971,16 @@ class AnalyticsController extends Controller
             [$startUtc, $endUtc] = $this->resolveShiftWindow($date, $shift, $appTimezone);
             $startApp = $startUtc->copy()->setTimezone($appTimezone);
             $endApp = $endUtc->copy()->setTimezone($appTimezone);
-            $startStr = $startApp->format('Y-m-d H:i:s');
-            $endStr = $endApp->format('Y-m-d H:i:s');
+            $nowApp = Carbon::now($appTimezone);
+            $effectiveEndApp = $nowApp->lessThan($endApp) ? $nowApp->copy() : $endApp->copy();
 
-            $rows = ProductionDataHourly::query()
-                ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
-                ->whereBetween('snapshot_at', [$startStr, $endStr])
-                ->orderBy('snapshot_at', 'asc')
-                ->get();
-
-            $cycleTime = $this->getCycleTimeForMachine($address);
-
-            [$anchorTime, $anchorBoardQty] = $this->resolveQuantityHourlyAnchorBeforeShift(
+            $data = $this->resolveQuantityHourlySeriesForShift(
                 $normalizedAddress,
                 $addressLower,
-                $startStr,
-                $appTimezone
-            );
-            if ($anchorTime === null) {
-                $anchorTime = $startApp->copy();
-                $anchorBoardQty = 0;
-            }
-
-            $data = $this->buildQuantityHourlyCumulativeSeries(
-                $rows,
-                $anchorTime,
-                $anchorBoardQty,
                 $startApp,
+                $effectiveEndApp,
                 $shift,
                 $appTimezone,
-                $cycleTime,
-                $cavity,
                 $otSettingsForDay
             );
 
@@ -2164,7 +2318,8 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * OEE per jam dari oee_records_hourly untuk satu mesin (line + stacked A/P/Q).
+     * OEE per jam untuk satu mesin (line + stacked A/P/Q).
+     * Sumber utama: agregasi snapshot 5 menit; fallback ke production_data_hourly + oee_records_hourly.
      */
     public function getOeeHourly(Request $request)
     {
@@ -2196,8 +2351,35 @@ class AnalyticsController extends Controller
         $startStr = $startApp->format('Y-m-d H:i:s');
         $effectiveEndStr = $effectiveEndApp->format('Y-m-d H:i:s');
 
-        // Ikuti logika sumber yang sama dengan chart quantity per jam:
-        // ambil snapshot production_data_hourly lalu hitung OEE dari quantity vs ideal_qty.
+        // Utamakan snapshot 5 menit (akurat); agregasi ke per jam untuk line chart.
+        $fiveMinRows = $this->fetchFiveMinuteSnapshotsForMachine($addressLower, $startStr, $effectiveEndStr);
+        if ($fiveMinRows->isNotEmpty()) {
+            $data = $this->buildOeeHourlySeriesFromFiveMinute($fiveMinRows, $appTimezone);
+
+            $shiftDate = Carbon::parse($request->date, $appTimezone);
+            $endSlotApp = $request->shift === 'pagi'
+                ? $shiftDate->copy()->setTime(20, 0, 0)
+                : $shiftDate->copy()->addDay()->setTime(7, 0, 0);
+            $data = $this->ensureOeeHourlyEndSlotAfterShiftEnd($data, $endSlotApp, $nowApp, $appTimezone);
+
+            $lastSnap = $fiveMinRows->last();
+            $shiftApq = [
+                'availability_percent' => $lastSnap->availability_percent !== null
+                    ? round((float) $lastSnap->availability_percent, 2) : null,
+                'performance_percent' => $lastSnap->performance_percent !== null
+                    ? round((float) $lastSnap->performance_percent, 2) : null,
+                'quality_percent' => $lastSnap->quality_percent !== null
+                    ? round((float) $lastSnap->quality_percent, 2) : 100.0,
+            ];
+
+            return response()->json([
+                'success' => true,
+                'data' => $data,
+                'shift_apq' => $shiftApq,
+            ]);
+        }
+
+        // Fallback: production_data_hourly + oee_records_hourly bila belum ada snapshot 5 menit.
         $prodRows = ProductionDataHourly::query()
             ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
             ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
