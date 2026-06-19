@@ -1360,7 +1360,19 @@ class AnalyticsController extends Controller
         $cavity = max(1, (int) ($machine->cavity ?? 1));
 
         // Sumber OEE akumulasi: snapshot 5 menit terakhir (selaras chart per 5 menit yang akurat).
-        $fiveMinMetrics = $this->resolveFiveMinuteShiftOeeMetrics($addressLower, $startStr, $effectiveEndStr);
+        $fiveMinMetrics = $this->resolveFiveMinuteShiftOeeMetrics(
+            $addressLower,
+            $startStr,
+            $effectiveEndStr,
+            $dateStr,
+            $shift,
+            $appTimezone,
+            $startApp,
+            $effectiveEndApp,
+            $otSettingsForDay,
+            $cycleTime,
+            $cavity
+        );
         if ($fiveMinMetrics !== null) {
             return $fiveMinMetrics;
         }
@@ -1677,8 +1689,199 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Agregasi snapshot 5 menit → deret per jam (ambil titik terakhir tiap jam).
-     * Quantity & ideal langsung dari kolom total_product / ideal_quantity (sama dengan chart per 5 menit).
+     * Pilih satu snapshot per jam: prioritaskan menit 00 (08:00, 09:00, …), bukan :55.
+     *
+     * @param \Illuminate\Database\Eloquent\Collection<int, ProductionOeeSnapshotFiveMinute> $rows
+     * @return array<string, array{row: ProductionOeeSnapshotFiveMinute, snap: Carbon, display_at: Carbon}>
+     */
+    private function pickFiveMinuteSnapshotPerHourAtMinuteZero($rows, string $appTimezone): array
+    {
+        $groups = [];
+        foreach ($rows as $row) {
+            $snap = $row->snapshot_at instanceof Carbon
+                ? $row->snapshot_at->copy()->setTimezone($appTimezone)
+                : Carbon::parse((string) $row->snapshot_at, $appTimezone);
+            $hourKey = $snap->format('Y-m-d H');
+            $minute = (int) $snap->format('i');
+            if (!isset($groups[$hourKey])) {
+                $groups[$hourKey] = [];
+            }
+            $groups[$hourKey][] = ['row' => $row, 'snap' => $snap, 'minute' => $minute];
+        }
+
+        $picked = [];
+        foreach ($groups as $hourKey => $items) {
+            $chosen = null;
+            foreach ($items as $item) {
+                if ($item['minute'] === 0) {
+                    $chosen = $item;
+                    break;
+                }
+            }
+            if ($chosen === null) {
+                usort($items, static fn(array $a, array $b): int => $a['minute'] <=> $b['minute']);
+                $chosen = $items[0];
+            }
+            $displayAt = Carbon::parse($hourKey . ':00', $appTimezone);
+            $picked[$hourKey] = [
+                'row' => $chosen['row'],
+                'snap' => $chosen['snap'],
+                'display_at' => $displayAt,
+            ];
+        }
+
+        ksort($picked);
+
+        return $picked;
+    }
+
+    /**
+     * Hitung split kumulatif Reguler vs OT sampai titik snapshot tertentu.
+     *
+     * @param \Illuminate\Database\Eloquent\Collection<int, ProductionOeeSnapshotFiveMinute> $rows
+     * @return array{0: int, 1: int}
+     */
+    private function computeFiveMinuteOtSplitAtSnapshot(
+        $rows,
+        Carbon $atSnap,
+        string $shift,
+        string $appTimezone
+    ): array {
+        $cumRegular = 0;
+        $cumOt = 0;
+        $prevSnap = null;
+        $prevProduct = null;
+
+        foreach ($rows as $row) {
+            $snap = $row->snapshot_at instanceof Carbon
+                ? $row->snapshot_at->copy()->setTimezone($appTimezone)
+                : Carbon::parse((string) $row->snapshot_at, $appTimezone);
+            if ($snap->greaterThan($atSnap)) {
+                break;
+            }
+
+            $product = max(0, (int) ($row->total_product ?? 0));
+            if ($prevSnap !== null && $prevProduct !== null) {
+                $delta = ($product >= $prevProduct) ? ($product - $prevProduct) : $product;
+                $hour = (int) $prevSnap->format('G');
+                $band = $this->classifyQuantityHourlyIntervalBand($shift, $hour);
+                if ($band === 'ot') {
+                    $cumOt += $delta;
+                } else {
+                    $cumRegular += $delta;
+                }
+            }
+
+            $prevSnap = $snap;
+            $prevProduct = $product;
+        }
+
+        return [(int) $cumRegular, (int) $cumOt];
+    }
+
+    /**
+     * Snapshot 5 menit terakhir dengan snapshot_at <= $tApp dalam window shift.
+     */
+    private function findLastFiveMinuteSnapshotAtOrBefore(
+        string $addressLower,
+        string $startStr,
+        Carbon $tApp,
+        string $appTimezone
+    ): ?ProductionOeeSnapshotFiveMinute {
+        $tStr = $tApp->format('Y-m-d H:i:s');
+
+        return ProductionOeeSnapshotFiveMinute::query()
+            ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
+            ->where('snapshot_at', '>=', $startStr)
+            ->where('snapshot_at', '<=', $tStr)
+            ->orderBy('snapshot_at', 'desc')
+            ->first();
+    }
+
+    /**
+     * Ideal qty kumulatif dengan penyesuaian OT hanya pada rentang jam OT (jika OT aktif di jadwal).
+     * Rentang reguler: pakai ideal tersimpan snapshot (tidak diubah).
+     */
+    private function resolveIdealQuantityForFiveMinutePoint(
+        ProductionOeeSnapshotFiveMinute $row,
+        Carbon $displayAt,
+        string $shift,
+        string $appTimezone,
+        Carbon $shiftStartApp,
+        array $otSettingsForDay,
+        int $cycleTime,
+        int $cavity
+    ): int {
+        $storedIdeal = max(0, (int) ($row->ideal_quantity ?? 0));
+        $otEnabled = (bool) ($otSettingsForDay['enabled'] ?? false);
+        if (!$otEnabled || $cycleTime <= 0) {
+            return $storedIdeal;
+        }
+
+        $hour = (int) $displayAt->format('G');
+        if ($this->classifyQuantityHourlyIntervalBand($shift, $hour) !== 'ot') {
+            return $storedIdeal;
+        }
+
+        $otDur = $this->resolveOtDurationTypeForRunningHour(
+            $shift,
+            $otSettingsForDay['duration_type'] ?? null
+        );
+
+        return $this->computeCumulativeIdealQuantityForSnapshot(
+            $displayAt,
+            $shiftStartApp,
+            $shift,
+            $appTimezone,
+            $cycleTime,
+            $cavity,
+            true,
+            $otDur
+        );
+    }
+
+    /**
+     * OEE (%) dari titik snapshot dengan penyesuaian ideal OT saat jadwal OT diinput belakangan.
+     */
+    private function resolveOeePercentForFiveMinutePoint(
+        ProductionOeeSnapshotFiveMinute $row,
+        Carbon $displayAt,
+        string $shift,
+        string $appTimezone,
+        Carbon $shiftStartApp,
+        array $otSettingsForDay,
+        int $cycleTime,
+        int $cavity
+    ): ?float {
+        $product = max(0, (int) ($row->total_product ?? 0));
+        $ideal = $this->resolveIdealQuantityForFiveMinutePoint(
+            $row,
+            $displayAt,
+            $shift,
+            $appTimezone,
+            $shiftStartApp,
+            $otSettingsForDay,
+            $cycleTime,
+            $cavity
+        );
+
+        if ($ideal <= 0) {
+            return null;
+        }
+
+        $otEnabled = (bool) ($otSettingsForDay['enabled'] ?? false);
+        $hour = (int) $displayAt->format('G');
+        $isOtBand = $otEnabled && $this->classifyQuantityHourlyIntervalBand($shift, $hour) === 'ot';
+
+        if (!$isOtBand && $row->oee_percent !== null) {
+            return round((float) $row->oee_percent, 2);
+        }
+
+        return round(($product / $ideal) * 100, 2);
+    }
+
+    /**
+     * Agregasi snapshot 5 menit → deret per jam (titik menit :00 tiap jam).
      *
      * @param \Illuminate\Database\Eloquent\Collection<int, ProductionOeeSnapshotFiveMinute> $rows
      * @return array<int, array<string, mixed>>
@@ -1690,85 +1893,83 @@ class AnalyticsController extends Controller
         bool $otEnabled,
         Carbon $shiftStartApp
     ): array {
-        $byHour = [];
-        $prevSnap = null;
-        $prevProduct = null;
-        $cumRegular = 0;
-        $cumOt = 0;
+        $picked = $this->pickFiveMinuteSnapshotPerHourAtMinuteZero($rows, $appTimezone);
+        $out = [];
         $prevHourlySnapshotAt = null;
-        $currentHourKey = null;
 
-        foreach ($rows as $row) {
-            $snap = $row->snapshot_at instanceof Carbon
-                ? $row->snapshot_at->copy()->setTimezone($appTimezone)
-                : Carbon::parse((string) $row->snapshot_at, $appTimezone);
+        foreach ($picked as $item) {
+            /** @var ProductionOeeSnapshotFiveMinute $row */
+            $row = $item['row'];
+            $displayAt = $item['display_at'];
             $product = max(0, (int) ($row->total_product ?? 0));
             $ideal = max(0, (int) ($row->ideal_quantity ?? 0));
-
-            if ($prevSnap !== null && $prevProduct !== null && $otEnabled) {
-                $delta = ($product >= $prevProduct) ? ($product - $prevProduct) : $product;
-                $hour = (int) $prevSnap->format('G');
-                $band = $this->classifyQuantityHourlyIntervalBand($shift, $hour);
-                if ($band === 'ot') {
-                    $cumOt += $delta;
-                } else {
-                    $cumRegular += $delta;
-                }
-            }
-
-            $hourKey = $snap->format('Y-m-d H');
-            if ($currentHourKey !== null && $hourKey !== $currentHourKey && isset($byHour[$currentHourKey])) {
-                $prevHourlySnapshotAt = (string) $byHour[$currentHourKey]['snapshot_at'];
-            }
-            $currentHourKey = $hourKey;
 
             $periodStart = $prevHourlySnapshotAt ?? $shiftStartApp->format('Y-m-d H:i');
             $entry = [
                 'period_start' => $periodStart,
-                'period_end' => $snap->format('Y-m-d H:i'),
-                'snapshot_at' => $snap->format('Y-m-d H:i'),
-                'label' => $snap->format('d/m H:i'),
+                'period_end' => $displayAt->format('Y-m-d H:i'),
+                'snapshot_at' => $displayAt->format('Y-m-d H:i'),
+                'label' => $displayAt->format('d/m H:i'),
                 'quantity' => $product,
                 'ideal_quantity' => $ideal,
             ];
+
             if ($otEnabled) {
-                $entry['quantity_cumulative_regular'] = (int) $cumRegular;
-                $entry['quantity_cumulative_ot'] = (int) $cumOt;
+                [$cumRegular, $cumOt] = $this->computeFiveMinuteOtSplitAtSnapshot(
+                    $rows,
+                    $item['snap'],
+                    $shift,
+                    $appTimezone
+                );
+                $entry['quantity_cumulative_regular'] = $cumRegular;
+                $entry['quantity_cumulative_ot'] = $cumOt;
             }
 
-            $byHour[$hourKey] = $entry;
-            $prevSnap = $snap;
-            $prevProduct = $product;
+            $out[] = $entry;
+            $prevHourlySnapshotAt = $displayAt->format('Y-m-d H:i');
         }
 
-        ksort($byHour);
-
-        return array_values($byHour);
+        return $out;
     }
 
     /**
-     * Agregasi snapshot OEE 5 menit → deret per jam (titik terakhir tiap jam).
+     * Agregasi snapshot OEE 5 menit → deret per jam (menit :00).
+     * Ideal/OEE rentang OT disesuaikan otomatis jika OT dijadwalkan belakangan.
      *
      * @param \Illuminate\Database\Eloquent\Collection<int, ProductionOeeSnapshotFiveMinute> $rows
      * @return array<int, array<string, mixed>>
      */
-    private function buildOeeHourlySeriesFromFiveMinute($rows, string $appTimezone): array
-    {
-        $byHour = [];
-        foreach ($rows as $row) {
-            $snap = $row->snapshot_at instanceof Carbon
-                ? $row->snapshot_at->copy()->setTimezone($appTimezone)
-                : Carbon::parse((string) $row->snapshot_at, $appTimezone);
-            $hourKey = $snap->format('Y-m-d H');
-            $oee = $row->oee_percent !== null ? round((float) $row->oee_percent, 2) : null;
-            $ideal = max(0, (int) ($row->ideal_quantity ?? 0));
-            $product = max(0, (int) ($row->total_product ?? 0));
-            if ($oee === null && $ideal > 0) {
-                $oee = round(($product / $ideal) * 100, 2);
-            }
+    private function buildOeeHourlySeriesFromFiveMinute(
+        $rows,
+        string $shift,
+        string $appTimezone,
+        Carbon $shiftStartApp,
+        array $otSettingsForDay,
+        int $cycleTime,
+        int $cavity
+    ): array {
+        $picked = $this->pickFiveMinuteSnapshotPerHourAtMinuteZero($rows, $appTimezone);
+        $out = [];
 
-            $byHour[$hourKey] = [
-                'snapshot_at' => $snap->format('Y-m-d H:i'),
+        foreach ($picked as $item) {
+            /** @var ProductionOeeSnapshotFiveMinute $row */
+            $row = $item['row'];
+            $displayAt = $item['display_at'];
+
+            $oee = $this->resolveOeePercentForFiveMinutePoint(
+                $row,
+                $displayAt,
+                $shift,
+                $appTimezone,
+                $shiftStartApp,
+                $otSettingsForDay,
+                $cycleTime,
+                $cavity
+            );
+
+            $out[] = [
+                'snapshot_at' => $displayAt->format('Y-m-d H:i'),
+                'label' => $displayAt->format('d/m H:i'),
                 'oee_percent' => $oee,
                 'availability_percent' => $row->availability_percent !== null
                     ? round((float) $row->availability_percent, 2) : null,
@@ -1779,9 +1980,7 @@ class AnalyticsController extends Controller
             ];
         }
 
-        ksort($byHour);
-
-        return array_values($byHour);
+        return $out;
     }
 
     /**
@@ -1851,13 +2050,22 @@ class AnalyticsController extends Controller
 
     /**
      * Metrik OEE akumulasi shift dari snapshot 5 menit terakhir dalam window.
+     * Ideal reguler tetap dari snapshot (tidak diubah); ideal OT dihitung ulang jika OT dijadwalkan belakangan.
      *
      * @return array{oee: ?float, availability: ?float, performance: ?float, quality: float}|null
      */
     private function resolveFiveMinuteShiftOeeMetrics(
         string $addressLower,
         string $startStr,
-        string $effectiveEndStr
+        string $effectiveEndStr,
+        string $dateStr,
+        string $shift,
+        string $appTimezone,
+        Carbon $shiftStartApp,
+        Carbon $effectiveEndApp,
+        array $otSettingsForDay,
+        int $cycleTime,
+        int $cavity
     ): ?array {
         $lastSnap = ProductionOeeSnapshotFiveMinute::query()
             ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
@@ -1869,21 +2077,75 @@ class AnalyticsController extends Controller
             return null;
         }
 
-        $oee = $lastSnap->oee_percent !== null ? round((float) $lastSnap->oee_percent, 2) : null;
-        $ideal = max(0, (int) ($lastSnap->ideal_quantity ?? 0));
         $product = max(0, (int) ($lastSnap->total_product ?? 0));
-        if ($oee === null && $ideal > 0) {
-            $oee = round(($product / $ideal) * 100, 2);
+        $storedIdeal = max(0, (int) ($lastSnap->ideal_quantity ?? 0));
+        $availability = $lastSnap->availability_percent !== null
+            ? round((float) $lastSnap->availability_percent, 2) : null;
+        $performance = $lastSnap->performance_percent !== null
+            ? round((float) $lastSnap->performance_percent, 2) : null;
+        $quality = $lastSnap->quality_percent !== null
+            ? round((float) $lastSnap->quality_percent, 2) : 100.0;
+
+        $otEnabled = (bool) ($otSettingsForDay['enabled'] ?? false);
+        $otDur = $this->resolveOtDurationTypeForRunningHour(
+            $shift,
+            $otSettingsForDay['duration_type'] ?? null
+        );
+
+        $oee = null;
+        if ($otEnabled && $cycleTime > 0) {
+            [, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
+            $endRegulerApp = $endRegulerUtc->copy()->setTimezone($appTimezone);
+
+            if ($effectiveEndApp->greaterThan($endRegulerApp)) {
+                $regularSnap = $this->findLastFiveMinuteSnapshotAtOrBefore(
+                    $addressLower,
+                    $startStr,
+                    $endRegulerApp,
+                    $appTimezone
+                );
+                $idealRegular = $regularSnap
+                    ? max(0, (int) ($regularSnap->ideal_quantity ?? 0))
+                    : 0;
+
+                $runAtEnd = $this->computeRunningHourSecondsForSnapshot(
+                    $effectiveEndApp,
+                    $shiftStartApp,
+                    $shift,
+                    $appTimezone,
+                    true,
+                    $otDur
+                );
+                $runAtRegEnd = $this->computeRunningHourSecondsForSnapshot(
+                    $endRegulerApp,
+                    $shiftStartApp,
+                    $shift,
+                    $appTimezone,
+                    true,
+                    $otDur
+                );
+                $otRunSec = max(0, $runAtEnd - $runAtRegEnd);
+                $idealOt = (int) floor($otRunSec / $cycleTime) * $cavity;
+                $idealTotal = $idealRegular + $idealOt;
+
+                if ($idealTotal > 0) {
+                    $oee = round(($product / $idealTotal) * 100, 2);
+                }
+            }
+        }
+
+        if ($oee === null) {
+            $oee = $lastSnap->oee_percent !== null ? round((float) $lastSnap->oee_percent, 2) : null;
+            if ($oee === null && $storedIdeal > 0) {
+                $oee = round(($product / $storedIdeal) * 100, 2);
+            }
         }
 
         return [
             'oee' => $oee,
-            'availability' => $lastSnap->availability_percent !== null
-                ? round((float) $lastSnap->availability_percent, 2) : null,
-            'performance' => $lastSnap->performance_percent !== null
-                ? round((float) $lastSnap->performance_percent, 2) : null,
-            'quality' => $lastSnap->quality_percent !== null
-                ? round((float) $lastSnap->quality_percent, 2) : 100.0,
+            'availability' => $availability,
+            'performance' => $performance,
+            'quality' => $quality,
         ];
     }
 
@@ -2354,7 +2616,23 @@ class AnalyticsController extends Controller
         // Utamakan snapshot 5 menit (akurat); agregasi ke per jam untuk line chart.
         $fiveMinRows = $this->fetchFiveMinuteSnapshotsForMachine($addressLower, $startStr, $effectiveEndStr);
         if ($fiveMinRows->isNotEmpty()) {
-            $data = $this->buildOeeHourlySeriesFromFiveMinute($fiveMinRows, $appTimezone);
+            $otSettingsForDay = $this->getOtSettingsForMachineForScheduleDay(
+                $address,
+                $request->date,
+                $request->shift
+            );
+            $cycleTime = $this->getCycleTimeForMachine($address);
+            $cavity = $this->getCavityForMachine($address);
+
+            $data = $this->buildOeeHourlySeriesFromFiveMinute(
+                $fiveMinRows,
+                $request->shift,
+                $appTimezone,
+                $startApp,
+                $otSettingsForDay,
+                $cycleTime,
+                $cavity
+            );
 
             $shiftDate = Carbon::parse($request->date, $appTimezone);
             $endSlotApp = $request->shift === 'pagi'
@@ -2362,14 +2640,33 @@ class AnalyticsController extends Controller
                 : $shiftDate->copy()->addDay()->setTime(7, 0, 0);
             $data = $this->ensureOeeHourlyEndSlotAfterShiftEnd($data, $endSlotApp, $nowApp, $appTimezone);
 
+            $shiftMetrics = $this->resolveFiveMinuteShiftOeeMetrics(
+                $addressLower,
+                $startStr,
+                $effectiveEndStr,
+                $request->date,
+                $request->shift,
+                $appTimezone,
+                $startApp,
+                $effectiveEndApp,
+                $otSettingsForDay,
+                $cycleTime,
+                $cavity
+            );
             $lastSnap = $fiveMinRows->last();
             $shiftApq = [
-                'availability_percent' => $lastSnap->availability_percent !== null
-                    ? round((float) $lastSnap->availability_percent, 2) : null,
-                'performance_percent' => $lastSnap->performance_percent !== null
-                    ? round((float) $lastSnap->performance_percent, 2) : null,
-                'quality_percent' => $lastSnap->quality_percent !== null
-                    ? round((float) $lastSnap->quality_percent, 2) : 100.0,
+                'availability_percent' => $shiftMetrics['availability'] ?? (
+                    $lastSnap->availability_percent !== null
+                        ? round((float) $lastSnap->availability_percent, 2) : null
+                ),
+                'performance_percent' => $shiftMetrics['performance'] ?? (
+                    $lastSnap->performance_percent !== null
+                        ? round((float) $lastSnap->performance_percent, 2) : null
+                ),
+                'quality_percent' => $shiftMetrics['quality'] ?? (
+                    $lastSnap->quality_percent !== null
+                        ? round((float) $lastSnap->quality_percent, 2) : 100.0
+                ),
             ];
 
             return response()->json([
