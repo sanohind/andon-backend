@@ -13,12 +13,19 @@ class HourlyProductionOeeSnapshotCommand extends Command
 
     public function handle(): int
     {
+        // 1. Sinkronisasi data produksi dari Odoo untuk mesin NIP2
+        $this->info("Menjalankan sinkronisasi Odoo...");
+        Artisan::call('odoo:sync-production-hourly');
+        $this->output->write(Artisan::output());
+
+        // 2. Snapshot produksi per jam
         $code = Artisan::call('production:hourly-snapshot');
         $this->output->write(Artisan::output());
         if ($code !== 0) {
             return self::FAILURE;
         }
 
+        // 3. Snapshot OEE per jam
         $code = Artisan::call('oee:hourly-snapshot');
         $this->output->write(Artisan::output());
 

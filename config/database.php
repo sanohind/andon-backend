@@ -105,6 +105,52 @@ return [
             ],
         ],
 
+        'pgsql2' => [
+            'driver' => 'pgsql',
+            'url' => env('DB_URL2'),
+            'host' => env('DB_HOST2', '127.0.0.1'),
+            'port' => env('DB_PORT2', '5432'),
+            'database' => env('DB_DATABASE2', 'laravel'),
+            'username' => env('DB_USERNAME2', 'root'),
+            'password' => env('DB_PASSWORD2', ''),
+            'charset' => env('DB_CHARSET2', 'utf8'),
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'search_path' => 'public',
+            'sslmode' => 'prefer',
+            'options' => [
+                \PDO::ATTR_EMULATE_PREPARES => true,
+                \PDO::ATTR_STRINGIFY_FETCHES => true,
+            ],
+            'timezone' => 'Asia/Jakarta',
+            'modes' => [
+                'ON_ERROR_STOP',
+            ],
+        ],
+
+        'pgsql3' => [
+            'driver' => 'pgsql',
+            'url' => env('DB_URL3'),
+            'host' => env('DB_HOST3', '127.0.0.1'),
+            'port' => env('DB_PORT3', '5432'),
+            'database' => env('DB_DATABASE3', 'laravel'),
+            'username' => env('DB_USERNAME3', 'root'),
+            'password' => env('DB_PASSWORD3', ''),
+            'charset' => env('DB_CHARSET3', 'utf8'),
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'search_path' => 'public',
+            'sslmode' => 'prefer',
+            'options' => [
+                \PDO::ATTR_EMULATE_PREPARES => true,
+                \PDO::ATTR_STRINGIFY_FETCHES => true,
+            ],
+            'timezone' => 'Asia/Jakarta',
+            'modes' => [
+                'ON_ERROR_STOP',
+            ],
+        ],
+
         'sqlsrv' => [
             'driver' => 'sqlsrv',
             'url' => env('DB_URL'),
