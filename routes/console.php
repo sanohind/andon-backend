@@ -26,13 +26,13 @@ Schedule::command('production-oee:five-minute-snapshot')
 // Sinkronisasi awal shift untuk mesin Odoo (dijalankan tepat setelah shift resmi berganti pada detik :30)
 // Memastikan data di production_data langsung ter-reset menjadi 0 pada awal shift baru
 Schedule::command('odoo:sync-production-hourly')
-    ->dailyAt('07:01')
+    ->dailyAt('07:05')
     ->timezone(config('app.timezone', 'Asia/Jakarta'))
     ->withoutOverlapping()
     ->runInBackground();
 
 Schedule::command('odoo:sync-production-hourly')
-    ->dailyAt('20:01')
+    ->dailyAt('20:05')
     ->timezone(config('app.timezone', 'Asia/Jakarta'))
     ->withoutOverlapping()
     ->runInBackground();
