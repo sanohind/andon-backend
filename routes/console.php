@@ -23,6 +23,20 @@ Schedule::command('production-oee:five-minute-snapshot')
     ->withoutOverlapping()
     ->runInBackground();
 
+// Sinkronisasi awal shift untuk mesin Odoo (dijalankan tepat setelah shift resmi berganti pada detik :30)
+// Memastikan data di production_data langsung ter-reset menjadi 0 pada awal shift baru
+Schedule::command('odoo:sync-production-hourly')
+    ->dailyAt('07:01')
+    ->timezone(config('app.timezone', 'Asia/Jakarta'))
+    ->withoutOverlapping()
+    ->runInBackground();
+
+Schedule::command('odoo:sync-production-hourly')
+    ->dailyAt('20:01')
+    ->timezone(config('app.timezone', 'Asia/Jakarta'))
+    ->withoutOverlapping()
+    ->runInBackground();
+
 // Terapkan schedule ke inspection_tables:
 // - Shift pagi: jalan tiap jam dalam window jam 07:00–19:59
 // - Shift malam: jalan tiap jam dalam window jam 20:00–06:59

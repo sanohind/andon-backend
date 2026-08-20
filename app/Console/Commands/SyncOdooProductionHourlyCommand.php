@@ -143,17 +143,19 @@ class SyncOdooProductionHourlyCommand extends Command
                     'quantity' => $totalOutput,
                 ]);
 
-                // B. Simpan / Update ke production_data_hourly (snapshot analitik per jam)
-                ProductionDataHourly::updateOrCreate(
-                    [
-                        'snapshot_at' => $snapshotAt->format('Y-m-d H:00:00'),
-                        'machine_name' => $machineAddress,
-                    ],
-                    [
-                        'line_name' => $lineName,
-                        'quantity' => $totalOutput,
-                    ]
-                );
+                // B. Simpan / Update ke production_data_hourly hanya jika dieksekusi pada menit 0 (snapshot per jam)
+                if ($snapshotAt->minute === 0) {
+                    ProductionDataHourly::updateOrCreate(
+                        [
+                            'snapshot_at' => $snapshotAt->format('Y-m-d H:00:00'),
+                            'machine_name' => $machineAddress,
+                        ],
+                        [
+                            'line_name' => $lineName,
+                            'quantity' => $totalOutput,
+                        ]
+                    );
+                }
 
                 $syncedCount++;
             } catch (\Throwable $e) {
