@@ -615,6 +615,10 @@ class DashboardController extends Controller
                 }
             }
 
+            if ($this->isNip2Machine($machineName, $table->address, $table->machine_id ?? null)) {
+                $runtimeSeconds = $runningHourSeconds;
+            }
+
             $statusData = [
                 'name' => $machineName,
                 'line_name' => $lineName, // TAMBAHAN: Sertakan line_name dalam response
@@ -868,6 +872,10 @@ class DashboardController extends Controller
                 }
             }
 
+            if ($this->isNip2Machine($machineName, $table->address, $table->machine_id ?? null)) {
+                $runtimeSeconds = $runningHourSeconds;
+            }
+
             $statusData = [
                 'name' => $machineName,
                 'line_name' => $lineName,
@@ -1015,6 +1023,26 @@ class DashboardController extends Controller
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
 
         return ProductionShiftInfo::resolve($now, $appTimezone);
+    }
+
+    /**
+     * Cek apakah mesin merupakan mesin NIP2 (262 => NIP2 01, 263 => NIP2 02, 264 => NIP2 03).
+     * Untuk mesin NIP2, runtime disamakan dengan running hour.
+     */
+    private function isNip2Machine(?string $machineName, ?string $machineAddress = null, ?string $machineId = null): bool
+    {
+        $nip2Names = ['NIP2 01', 'NIP2 02', 'NIP2 03'];
+        $nip2Addresses = ['104-01', '104-02', '104-03'];
+
+        $name = trim((string) $machineName);
+        $addr = trim((string) $machineAddress);
+        $mid = trim((string) $machineId);
+
+        return in_array($name, $nip2Names, true)
+            || in_array($mid, $nip2Names, true)
+            || in_array($addr, $nip2Addresses, true)
+            || str_starts_with(strtoupper($name), 'NIP2')
+            || str_starts_with(strtoupper($mid), 'NIP2');
     }
 
     /**
