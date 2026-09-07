@@ -182,16 +182,18 @@ class SyncMongoNgHourlyCommand extends Command
             }
 
             try {
-                // Simpan ke production_ng_data (upsert berdasarkan machine_name dan shift_key)
+                // Simpan ke production_ng_data (di-lock per jam per shift, sehingga ada histori per jam)
+                $hourlySnapshotAt = $snapshotAt->copy()->format('Y-m-d H:00:00');
+
                 ProductionNgData::updateOrCreate(
                     [
                         'machine_name' => $machineAddress,
                         'shift_key' => $shiftKey,
+                        'snapshot_at' => $hourlySnapshotAt,
                     ],
                     [
                         'line_name' => $lineName,
                         'ng_qty' => $totalNg,
-                        'snapshot_at' => $snapshotAt,
                     ]
                 );
 

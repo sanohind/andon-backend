@@ -507,8 +507,11 @@ class DashboardController extends Controller
                 return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
             });
 
-        // Batch load data NG untuk shift saat ini
+        // Batch load data NG terbaru untuk shift saat ini
         $activeNgData = ProductionNgData::where('shift_key', $shiftInfo['shiftKey'])
+            ->orderBy('snapshot_at', 'desc')
+            ->get()
+            ->unique('machine_name')
             ->pluck('ng_qty', 'machine_name');
 
         foreach ($allInspectionTables as $table) {
@@ -751,8 +754,11 @@ class DashboardController extends Controller
                 return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
             });
 
-        // Batch load data NG untuk shift saat ini
+        // Batch load data NG terbaru untuk shift saat ini
         $activeNgData = ProductionNgData::where('shift_key', $shiftInfo['shiftKey'])
+            ->orderBy('snapshot_at', 'desc')
+            ->get()
+            ->unique('machine_name')
             ->pluck('ng_qty', 'machine_name');
 
         foreach ($allInspectionTables as $table) {
@@ -3497,6 +3503,7 @@ class DashboardController extends Controller
                     $ngRecord = ProductionNgData::query()
                         ->whereRaw('LOWER(TRIM(machine_name)) = ?', [strtolower($addr)])
                         ->where('shift_key', $shiftInfo['shiftKey'])
+                        ->orderByDesc('snapshot_at')
                         ->first();
                     $ngQty = $ngRecord ? (int) $ngRecord->ng_qty : 0;
                 }
@@ -3602,6 +3609,7 @@ class DashboardController extends Controller
                     $ngRecord = ProductionNgData::query()
                         ->whereRaw('LOWER(TRIM(machine_name)) = ?', [strtolower($addr)])
                         ->where('shift_key', $shiftInfo['shiftKey'])
+                        ->orderByDesc('snapshot_at')
                         ->first();
                     $ngQty = $ngRecord ? (int) $ngRecord->ng_qty : 0;
                 }
