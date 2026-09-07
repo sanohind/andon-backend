@@ -40,17 +40,17 @@ class SyncMongoNgHourlyCommand extends Command
         'NIP2 01' => [
             'name' => 'NIP2 01',
             'line_process_ids' => ['613980680bab5c69026e92e7'],
-            'fallback_address' => '104-01',
+            'fallback_address' => '116-03',
         ],
         'NIP2 02' => [
             'name' => 'NIP2 02',
             'line_process_ids' => ['6139634734cfbb67b86a74c7', '6139634734cfbb67b86a74c6'],
-            'fallback_address' => '104-02',
+            'fallback_address' => '116-04',
         ],
         'NIP2 03' => [
             'name' => 'NIP2 03',
             'line_process_ids' => ['6139634734cfbb67b86a74c4'],
-            'fallback_address' => '104-03',
+            'fallback_address' => '117-01',
         ],
     ];
 
@@ -194,24 +194,6 @@ class SyncMongoNgHourlyCommand extends Command
                         'snapshot_at' => $snapshotAt,
                     ]
                 );
-
-                // Sinkronkan juga untuk alias address lain (lokal vs production)
-                $allKnownAddresses = array_unique(array_filter([$machineAddress, $config['fallback_address'], $table?->address]));
-                foreach ($allKnownAddresses as $altAddress) {
-                    if ($altAddress !== $machineAddress) {
-                        ProductionNgData::updateOrCreate(
-                            [
-                                'machine_name' => $altAddress,
-                                'shift_key' => $shiftKey,
-                            ],
-                            [
-                                'line_name' => $lineName,
-                                'ng_qty' => $totalNg,
-                                'snapshot_at' => $snapshotAt,
-                            ]
-                        );
-                    }
-                }
 
                 $syncedCount++;
             } catch (\Throwable $e) {
