@@ -23,7 +23,7 @@ Schedule::command('production-oee:five-minute-snapshot')
     ->withoutOverlapping()
     ->runInBackground();
 
-// Sinkronisasi awal shift untuk mesin Odoo (dijalankan tepat setelah shift resmi berganti pada detik :30)
+// Sinkronisasi awal shift untuk mesin Odoo & Mongo NG (dijalankan tepat setelah shift resmi berganti pada detik :30)
 // Memastikan data di production_data langsung ter-reset menjadi 0 pada awal shift baru
 Schedule::command('odoo:sync-production-hourly')
     ->dailyAt('07:05')
@@ -32,6 +32,18 @@ Schedule::command('odoo:sync-production-hourly')
     ->runInBackground();
 
 Schedule::command('odoo:sync-production-hourly')
+    ->dailyAt('20:05')
+    ->timezone(config('app.timezone', 'Asia/Jakarta'))
+    ->withoutOverlapping()
+    ->runInBackground();
+
+Schedule::command('mongo:sync-ng-hourly')
+    ->dailyAt('07:05')
+    ->timezone(config('app.timezone', 'Asia/Jakarta'))
+    ->withoutOverlapping()
+    ->runInBackground();
+
+Schedule::command('mongo:sync-ng-hourly')
     ->dailyAt('20:05')
     ->timezone(config('app.timezone', 'Asia/Jakarta'))
     ->withoutOverlapping()

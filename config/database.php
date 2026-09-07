@@ -151,6 +151,23 @@ return [
             ],
         ],
 
+        'mongodb' => [
+            'driver' => 'mongodb',
+            'url' => env('DB_URL4'),
+            'host' => env('DB_HOST4', '127.0.0.1'),
+            'port' => env('DB_PORT4', '27017'),
+            'database' => env('DB_DATABASE4', 'laravel'),
+            'username' => env('DB_USERNAME4', ''),
+            'password' => env('DB_PASSWORD4', ''),
+            'options' => [
+                // MongoDB options
+            ],
+            'timezone' => 'Asia/Jakarta',
+            'modes' => [
+                'ON_ERROR_STOP',
+            ],
+        ],
+
         'sqlsrv' => [
             'driver' => 'sqlsrv',
             'url' => env('DB_URL'),

@@ -13,6 +13,7 @@ use App\Models\BreakSchedule;
 use App\Models\OeeRecord;
 use App\Models\OeeRecordHourly;
 use App\Models\ProductionOeeSnapshotFiveMinute;
+use App\Models\ProductionNgData;
 use App\Support\ProductionShiftInfo;
 use App\Support\RunningHourOtExtension;
 use Illuminate\Database\QueryException;
@@ -506,6 +507,10 @@ class DashboardController extends Controller
                 return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
             });
 
+        // Batch load data NG untuk shift saat ini
+        $activeNgData = ProductionNgData::where('shift_key', $shiftInfo['shiftKey'])
+            ->pluck('ng_qty', 'machine_name');
+
         foreach ($allInspectionTables as $table) {
             $machineName = $table->name;
             $lineName = $table->line_name;
@@ -615,6 +620,10 @@ class DashboardController extends Controller
                 }
             }
 
+            if ($this->isNip2Machine($machineName, $table->address, $table->machine_id ?? null)) {
+                $runtimeSeconds = $runningHourSeconds;
+            }
+
             $statusData = [
                 'name' => $machineName,
                 'line_name' => $lineName, // TAMBAHAN: Sertakan line_name dalam response
@@ -636,6 +645,7 @@ class DashboardController extends Controller
                 'target_ot' => $table->target_ot !== null ? (int) $table->target_ot : null,
                 'runtime_seconds' => $runtimeSeconds,
                 'running_hour_seconds' => $runningHourSeconds,
+                'ng_qty' => (int) ($activeNgData[$table->address] ?? 0),
             ];
             
             // Only log when status is not normal (to reduce log volume)
@@ -740,6 +750,10 @@ class DashboardController extends Controller
             ->keyBy(function($item) {
                 return $item->machine_name . '_line_' . ($item->table_line_name ?? 'default');
             });
+
+        // Batch load data NG untuk shift saat ini
+        $activeNgData = ProductionNgData::where('shift_key', $shiftInfo['shiftKey'])
+            ->pluck('ng_qty', 'machine_name');
 
         foreach ($allInspectionTables as $table) {
             $machineName = $table->name;
@@ -867,7 +881,10 @@ class DashboardController extends Controller
                     \Log::warning('Running hour calculation failed (role-filtered) for machine without address: ' . $e->getMessage());
                 }
             }
-
+            
+            if ($this->isNip2Machine($machineName, $table->address, $table->machine_id ?? null)) {
+                $runtimeSeconds = $runningHourSeconds;
+            }
 
             $statusData = [
                 'name' => $machineName,
@@ -890,6 +907,7 @@ class DashboardController extends Controller
                 'target_ot' => $table->target_ot !== null ? (int) $table->target_ot : null,
                 'runtime_seconds' => $runtimeSeconds,
                 'running_hour_seconds' => $runningHourSeconds,
+                'ng_qty' => (int) ($activeNgData[$table->address] ?? 0),
             ];
             
             // Only log when status is not normal (to reduce log volume)
@@ -1016,6 +1034,26 @@ class DashboardController extends Controller
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
 
         return ProductionShiftInfo::resolve($now, $appTimezone);
+    }
+
+    /**
+     * Cek apakah mesin merupakan mesin NIP2 (262 => NIP2 01, 263 => NIP2 02, 264 => NIP2 03).
+     * Untuk mesin NIP2, runtime disamakan dengan running hour.
+     */
+    private function isNip2Machine(?string $machineName, ?string $machineAddress = null, ?string $machineId = null): bool
+    {
+        $nip2Names = ['NIP2 01', 'NIP2 02', 'NIP2 03'];
+        $nip2Addresses = ['104-01', '104-02', '104-03', '116-03', '116-04', '117-01'];
+
+        $name = trim((string) $machineName);
+        $addr = trim((string) $machineAddress);
+        $mid = trim((string) $machineId);
+
+        return in_array($name, $nip2Names, true)
+            || in_array($mid, $nip2Names, true)
+            || in_array($addr, $nip2Addresses, true)
+            || str_starts_with(strtoupper($name), 'NIP2')
+            || str_starts_with(strtoupper($mid), 'NIP2');
     }
 
     /**
@@ -3347,13 +3385,14 @@ class DashboardController extends Controller
     /**
      * Hitung metrik OEE (sama definisi dengan dashboard production monitoring).
      */
-    private function computeOeeMetricsFromPrimitives(int $quantity, int $cavity, int $cycleSeconds, int $runtimeSeconds, int $runningHourSeconds): array
+    private function computeOeeMetricsFromPrimitives(int $quantity, int $cavity, int $cycleSeconds, int $runtimeSeconds, int $runningHourSeconds, int $ngQty = 0): array
     {
         $cavity = max(1, $cavity);
         $cycleSeconds = max(0, $cycleSeconds);
         $runtimeSeconds = max(0, $runtimeSeconds);
         $runningHourSeconds = max(0, $runningHourSeconds);
         $totalProduct = max(0, $quantity) * $cavity;
+        $ngQty = max(0, $ngQty);
 
         $idealBoard = ($cycleSeconds > 0 && $runningHourSeconds > 0)
             ? (int) floor($runningHourSeconds / $cycleSeconds) * $cavity
@@ -3362,10 +3401,21 @@ class DashboardController extends Controller
             ? (int) floor($runtimeSeconds / $cycleSeconds) * $cavity
             : 0;
 
-        $oee = ($idealBoard > 0) ? round(($totalProduct / $idealBoard) * 100, 2) : null;
         $availability = ($runningHourSeconds > 0) ? round(($runtimeSeconds / $runningHourSeconds) * 100, 2) : null;
         $performance = ($idealPerf > 0) ? round(($totalProduct / $idealPerf) * 100, 2) : null;
-        $quality = 100.0;
+
+        if ($totalProduct > 0 && $ngQty > 0) {
+            $quality = round(max(0, (($totalProduct - $ngQty) / $totalProduct)) * 100, 2);
+        } else {
+            $quality = 100.0;
+        }
+
+        if ($idealBoard > 0) {
+            $goodProduct = max(0, $totalProduct - $ngQty);
+            $oee = round(($goodProduct / $idealBoard) * 100, 2);
+        } else {
+            $oee = null;
+        }
 
         return [
             'oee' => $oee,
@@ -3373,6 +3423,7 @@ class DashboardController extends Controller
             'performance' => $performance,
             'quality' => $quality,
             'total_product' => $totalProduct,
+            'ng_qty' => $ngQty,
         ];
     }
 
@@ -3441,7 +3492,16 @@ class DashboardController extends Controller
                 $rt = (int) ($m['runtime_seconds'] ?? 0);
                 $rh = (int) ($m['running_hour_seconds'] ?? 0);
 
-                $metrics = $this->computeOeeMetricsFromPrimitives($qty, $cavity, $cycle, $rt, $rh);
+                $ngQty = 0;
+                if ($this->isNip2Machine($m['name'] ?? null, $addr)) {
+                    $ngRecord = ProductionNgData::query()
+                        ->whereRaw('LOWER(TRIM(machine_name)) = ?', [strtolower($addr)])
+                        ->where('shift_key', $shiftInfo['shiftKey'])
+                        ->first();
+                    $ngQty = $ngRecord ? (int) $ngRecord->ng_qty : 0;
+                }
+
+                $metrics = $this->computeOeeMetricsFromPrimitives($qty, $cavity, $cycle, $rt, $rh, $ngQty);
 
                 $addrLower = strtolower(trim($addr));
                 $shiftStartBoundary = $shiftInfo['shiftStart']->copy()->setTimezone($appTimezone);
@@ -3537,7 +3597,16 @@ class DashboardController extends Controller
                 $rt = (int) ($m['runtime_seconds'] ?? 0);
                 $rh = (int) ($m['running_hour_seconds'] ?? 0);
 
-                $metrics = $this->computeOeeMetricsFromPrimitives($qty, $cavity, $cycle, $rt, $rh);
+                $ngQty = 0;
+                if ($this->isNip2Machine($m['name'] ?? null, $addr)) {
+                    $ngRecord = ProductionNgData::query()
+                        ->whereRaw('LOWER(TRIM(machine_name)) = ?', [strtolower($addr)])
+                        ->where('shift_key', $shiftInfo['shiftKey'])
+                        ->first();
+                    $ngQty = $ngRecord ? (int) $ngRecord->ng_qty : 0;
+                }
+
+                $metrics = $this->computeOeeMetricsFromPrimitives($qty, $cavity, $cycle, $rt, $rh, $ngQty);
 
                 $addrLower = strtolower(trim($addr));
                 $prevSnap = ProductionOeeSnapshotFiveMinute::query()
