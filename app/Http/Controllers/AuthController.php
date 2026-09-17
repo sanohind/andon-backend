@@ -52,19 +52,16 @@ class AuthController extends Controller
             // Generate token untuk session
             $token = $this->generateToken();
 
-            // Simpan token ke database untuk tracking session
-            DB::table('user_sessions')->updateOrInsert(
-                ['user_id' => $user->id],
-                [
-                    'user_id' => $user->id,
-                    'token' => $token,
-                    'ip_address' => $request->ip(),
-                    'user_agent' => $request->userAgent(),
-                    'created_at' => Carbon::now(),
-                    'updated_at' => Carbon::now(),
-                    'expires_at' => Carbon::now()->addHours(24)
-                ]
-            );
+            // Simpan token ke database untuk tracking session (mendukung multi-device login)
+            DB::table('user_sessions')->insert([
+                'user_id' => $user->id,
+                'token' => $token,
+                'ip_address' => $request->ip(),
+                'user_agent' => $request->userAgent(),
+                'created_at' => Carbon::now(),
+                'updated_at' => Carbon::now(),
+                'expires_at' => Carbon::now()->addHours(24)
+            ]);
 
             // Update last login
             DB::table('users')

@@ -23,6 +23,11 @@ class HourlyProductionOeeSnapshotCommand extends Command
         Artisan::call('mongo:sync-ng-hourly');
         $this->output->write(Artisan::output());
 
+        // 1.6. Sinkronisasi data Downtime dari MongoDB untuk mesin NIP2
+        $this->info("Menjalankan sinkronisasi Downtime dari MongoDB...");
+        Artisan::call('mongo:sync-downtime-hourly');
+        $this->output->write(Artisan::output());
+
         // 2. Snapshot produksi per jam
         $code = Artisan::call('production:hourly-snapshot');
         $this->output->write(Artisan::output());

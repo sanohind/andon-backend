@@ -14,6 +14,7 @@ use App\Models\OeeRecord;
 use App\Models\OeeRecordHourly;
 use App\Models\ProductionOeeSnapshotFiveMinute;
 use App\Models\ProductionNgData;
+use App\Models\ProductionDowntimeData;
 use App\Support\ProductionShiftInfo;
 use App\Support\RunningHourOtExtension;
 use Illuminate\Database\QueryException;
@@ -514,6 +515,13 @@ class DashboardController extends Controller
             ->unique('machine_name')
             ->pluck('ng_qty', 'machine_name');
 
+        // Batch load data Downtime terbaru untuk shift saat ini
+        $activeDowntimeData = ProductionDowntimeData::where('shift_key', $shiftInfo['shiftKey'])
+            ->orderBy('snapshot_at', 'desc')
+            ->get()
+            ->unique('machine_name')
+            ->pluck('downtime_seconds', 'machine_name');
+
         foreach ($allInspectionTables as $table) {
             $machineName = $table->name;
             $lineName = $table->line_name;
@@ -623,8 +631,10 @@ class DashboardController extends Controller
                 }
             }
 
+            $downtimeSeconds = 0;
             if ($this->isNip2Machine($machineName, $table->address, $table->machine_id ?? null)) {
-                $runtimeSeconds = $runningHourSeconds;
+                $downtimeSeconds = (int) ($activeDowntimeData[$table->address] ?? 0);
+                $runtimeSeconds = max(0, $runningHourSeconds - $downtimeSeconds);
             }
 
             $statusData = [
@@ -648,6 +658,7 @@ class DashboardController extends Controller
                 'target_ot' => $table->target_ot !== null ? (int) $table->target_ot : null,
                 'runtime_seconds' => $runtimeSeconds,
                 'running_hour_seconds' => $runningHourSeconds,
+                'downtime_seconds' => $downtimeSeconds,
                 'ng_qty' => (int) ($activeNgData[$table->address] ?? 0),
             ];
             
@@ -760,6 +771,13 @@ class DashboardController extends Controller
             ->get()
             ->unique('machine_name')
             ->pluck('ng_qty', 'machine_name');
+
+        // Batch load data Downtime terbaru untuk shift saat ini
+        $activeDowntimeData = ProductionDowntimeData::where('shift_key', $shiftInfo['shiftKey'])
+            ->orderBy('snapshot_at', 'desc')
+            ->get()
+            ->unique('machine_name')
+            ->pluck('downtime_seconds', 'machine_name');
 
         foreach ($allInspectionTables as $table) {
             $machineName = $table->name;
@@ -888,8 +906,10 @@ class DashboardController extends Controller
                 }
             }
             
+            $downtimeSeconds = 0;
             if ($this->isNip2Machine($machineName, $table->address, $table->machine_id ?? null)) {
-                $runtimeSeconds = $runningHourSeconds;
+                $downtimeSeconds = (int) ($activeDowntimeData[$table->address] ?? 0);
+                $runtimeSeconds = max(0, $runningHourSeconds - $downtimeSeconds);
             }
 
             $statusData = [
@@ -913,6 +933,7 @@ class DashboardController extends Controller
                 'target_ot' => $table->target_ot !== null ? (int) $table->target_ot : null,
                 'runtime_seconds' => $runtimeSeconds,
                 'running_hour_seconds' => $runningHourSeconds,
+                'downtime_seconds' => $downtimeSeconds,
                 'ng_qty' => (int) ($activeNgData[$table->address] ?? 0),
             ];
             
@@ -1044,7 +1065,7 @@ class DashboardController extends Controller
 
     /**
      * Cek apakah mesin merupakan mesin NIP2 (262 => NIP2 01, 263 => NIP2 02, 264 => NIP2 03).
-     * Untuk mesin NIP2, runtime disamakan dengan running hour.
+     * Untuk mesin NIP2, runtime dihitung dari running hour dikurangi downtime riil MongoDB.
      */
     private function isNip2Machine(?string $machineName, ?string $machineAddress = null, ?string $machineId = null): bool
     {

@@ -49,6 +49,18 @@ Schedule::command('mongo:sync-ng-hourly')
     ->withoutOverlapping()
     ->runInBackground();
 
+Schedule::command('mongo:sync-downtime-hourly')
+    ->dailyAt('07:05')
+    ->timezone(config('app.timezone', 'Asia/Jakarta'))
+    ->withoutOverlapping()
+    ->runInBackground();
+
+Schedule::command('mongo:sync-downtime-hourly')
+    ->dailyAt('20:05')
+    ->timezone(config('app.timezone', 'Asia/Jakarta'))
+    ->withoutOverlapping()
+    ->runInBackground();
+
 // Terapkan schedule ke inspection_tables:
 // - Shift pagi: jalan tiap jam dalam window jam 07:00–19:59
 // - Shift malam: jalan tiap jam dalam window jam 20:00–06:59
