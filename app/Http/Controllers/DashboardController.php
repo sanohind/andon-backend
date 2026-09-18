@@ -15,6 +15,7 @@ use App\Models\OeeRecordHourly;
 use App\Models\ProductionOeeSnapshotFiveMinute;
 use App\Models\ProductionNgData;
 use App\Models\ProductionDowntimeData;
+use App\Models\MachineSchedule;
 use App\Support\ProductionShiftInfo;
 use App\Support\RunningHourOtExtension;
 use Illuminate\Database\QueryException;
@@ -486,6 +487,14 @@ class DashboardController extends Controller
                 ->get()
                 ->keyBy('machine_address');
         }
+
+        // Preload MachineSchedule untuk shift aktif agar kalkulasi OT tidak bergantung pada mutasi inspection_tables
+        $activeShift = strtolower(trim((string) ($shiftInfo['shift'] ?? '')));
+        $scheduleDate = $shiftInfo['shiftStart']->format('Y-m-d');
+        $schedulesForShift = MachineSchedule::whereDate('schedule_date', $scheduleDate)
+            ->whereRaw('LOWER(TRIM(COALESCE(shift, \'\'))) = ?', [$activeShift])
+            ->get()
+            ->keyBy(fn($item) => strtolower(trim((string) $item->machine_address)));
             
         $latestProductions = DB::table('production_data')
             ->select([
@@ -582,6 +591,12 @@ class DashboardController extends Controller
             $machineAddress = trim($table->address ?? '');
             if ($machineAddress) {
                 try {
+                    $sched = $schedulesForShift->get(strtolower($machineAddress));
+                    $otEnabled = $sched ? (bool) ($sched->ot_enabled ?? false) : (bool) ($table->ot_enabled ?? false);
+                    $otDurationType = $sched && $sched->ot_duration_type !== null
+                        ? (string) $sched->ot_duration_type
+                        : ($table->ot_duration_type ?? null);
+
                     $runtimeData = $this->computeRuntimeSecondsOptimized(
                         $machineAddress,
                         $now,
@@ -592,8 +607,8 @@ class DashboardController extends Controller
                         $problemType,
                         $timestamp,
                         $runtimeStates->get($machineAddress),
-                        (bool) ($table->ot_enabled ?? false),
-                        $table->ot_duration_type ?? null
+                        $otEnabled,
+                        $otDurationType
                     );
                     $runtimeSeconds = $runtimeData['runtime_seconds'];
                     $runningHourSeconds = $runtimeData['running_hour_seconds'];
@@ -745,6 +760,14 @@ class DashboardController extends Controller
                 ->get()
                 ->keyBy('machine_address');
         }
+
+        // Preload MachineSchedule untuk shift aktif agar kalkulasi OT tidak bergantung pada mutasi inspection_tables
+        $activeShift = strtolower(trim((string) ($shiftInfo['shift'] ?? '')));
+        $scheduleDate = $shiftInfo['shiftStart']->format('Y-m-d');
+        $schedulesForShift = MachineSchedule::whereDate('schedule_date', $scheduleDate)
+            ->whereRaw('LOWER(TRIM(COALESCE(shift, \'\'))) = ?', [$activeShift])
+            ->get()
+            ->keyBy(fn($item) => strtolower(trim((string) $item->machine_address)));
         $latestProductions = DB::table('production_data')
             ->select([
                 'production_data.*',
@@ -860,6 +883,12 @@ class DashboardController extends Controller
             $machineAddress = trim($table->address ?? '');
             if ($machineAddress) {
                 try {
+                    $sched = $schedulesForShift->get(strtolower($machineAddress));
+                    $otEnabled = $sched ? (bool) ($sched->ot_enabled ?? false) : (bool) ($table->ot_enabled ?? false);
+                    $otDurationType = $sched && $sched->ot_duration_type !== null
+                        ? (string) $sched->ot_duration_type
+                        : ($table->ot_duration_type ?? null);
+
                     $runtimeData = $this->computeRuntimeSecondsOptimized(
                         $machineAddress,
                         $now,
@@ -870,8 +899,8 @@ class DashboardController extends Controller
                         $problemType,
                         $timestamp,
                         $runtimeStates->get($machineAddress),
-                        (bool) ($table->ot_enabled ?? false),
-                        $table->ot_duration_type ?? null
+                        $otEnabled,
+                        $otDurationType
                     );
                     $runtimeSeconds = $runtimeData['runtime_seconds'];
                     $runningHourSeconds = $runtimeData['running_hour_seconds'];

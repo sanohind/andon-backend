@@ -62,10 +62,12 @@ Schedule::command('mongo:sync-downtime-hourly')
     ->runInBackground();
 
 // Terapkan schedule ke inspection_tables:
+// Jalankan di menit ke-1 setiap jam (hourlyAt(1)) agar tidak bertabrakan dengan snapshot jam :00
+// dan memberikan waktu bagi transisi shift resmi pada detik :30 (ProductionShiftInfo::RESET_DELAY_SECONDS)
 // - Shift pagi: jalan tiap jam dalam window jam 07:00–19:59
 // - Shift malam: jalan tiap jam dalam window jam 20:00–06:59
 Schedule::command('schedule:apply-daily', ['--shift' => 'pagi'])
-    ->hourly()
+    ->hourlyAt(1)
     ->timezone(config('app.timezone', 'Asia/Jakarta'))
     ->when(function () {
         $now = Carbon::now(config('app.timezone', 'Asia/Jakarta'));
@@ -77,7 +79,7 @@ Schedule::command('schedule:apply-daily', ['--shift' => 'pagi'])
     ->runInBackground();
 
 Schedule::command('schedule:apply-daily', ['--shift' => 'malam'])
-    ->hourly()
+    ->hourlyAt(1)
     ->timezone(config('app.timezone', 'Asia/Jakarta'))
     ->when(function () {
         $now = Carbon::now(config('app.timezone', 'Asia/Jakarta'));
