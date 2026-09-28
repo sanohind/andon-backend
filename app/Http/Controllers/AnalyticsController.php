@@ -1820,7 +1820,12 @@ class AnalyticsController extends Controller
 
         $hour = (int) $displayAt->format('G');
         if ($this->classifyQuantityHourlyIntervalBand($shift, $hour) !== 'ot') {
-            return $storedIdeal;
+            $dateStr = $shiftStartApp->format('Y-m-d');
+            [, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
+            $endRegulerApp = $endRegulerUtc->copy()->setTimezone($appTimezone);
+            if ($displayAt->lte($endRegulerApp)) {
+                return $storedIdeal;
+            }
         }
 
         $otDur = $this->resolveOtDurationTypeForRunningHour(
@@ -1872,6 +1877,10 @@ class AnalyticsController extends Controller
         $otEnabled = (bool) ($otSettingsForDay['enabled'] ?? false);
         $hour = (int) $displayAt->format('G');
         $isOtBand = $otEnabled && $this->classifyQuantityHourlyIntervalBand($shift, $hour) === 'ot';
+        $dateStr = $shiftStartApp->format('Y-m-d');
+        [, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
+        $endRegulerApp = $endRegulerUtc->copy()->setTimezone($appTimezone);
+        $isOtBand = $otEnabled && $displayAt->greaterThan($endRegulerApp);
 
         if (!$isOtBand && $row->oee_percent !== null) {
             return round((float) $row->oee_percent, 2);
@@ -1891,7 +1900,10 @@ class AnalyticsController extends Controller
         string $shift,
         string $appTimezone,
         bool $otEnabled,
-        Carbon $shiftStartApp
+        Carbon $shiftStartApp,
+        array $otSettingsForDay = [],
+        int $cycleTime = 0,
+        int $cavity = 1
     ): array {
         $picked = $this->pickFiveMinuteSnapshotPerHourAtMinuteZero($rows, $appTimezone);
         $out = [];
@@ -1903,6 +1915,16 @@ class AnalyticsController extends Controller
             $displayAt = $item['display_at'];
             $product = max(0, (int) ($row->total_product ?? 0));
             $ideal = max(0, (int) ($row->ideal_quantity ?? 0));
+            $ideal = $this->resolveIdealQuantityForFiveMinutePoint(
+                $row,
+                $displayAt,
+                $shift,
+                $appTimezone,
+                $shiftStartApp,
+                $otSettingsForDay,
+                $cycleTime,
+                $cavity
+            );
 
             $periodStart = $prevHourlySnapshotAt ?? $shiftStartApp->format('Y-m-d H:i');
             $entry = [
@@ -2003,12 +2025,17 @@ class AnalyticsController extends Controller
 
         $fiveMinRows = $this->fetchFiveMinuteSnapshotsForMachine($addressLower, $startStr, $effectiveEndStr);
         if ($fiveMinRows->isNotEmpty()) {
+            $cycleTime = $this->getCycleTimeForMachine($normalizedAddress);
+            $cavity = $this->getCavityForMachine($normalizedAddress);
             return $this->buildQuantityHourlySeriesFromFiveMinute(
                 $fiveMinRows,
                 $shift,
                 $appTimezone,
                 $otEnabled,
-                $startApp
+                $startApp,
+                $otSettingsForDay,
+                $cycleTime,
+                $cavity
             );
         }
 
@@ -2867,6 +2894,14 @@ class AnalyticsController extends Controller
         $startStr = $startApp->format('Y-m-d H:i:s');
         $effectiveEndStr = $effectiveEndApp->format('Y-m-d H:i:s');
 
+        $otSettingsForDay = $this->getOtSettingsForMachineForScheduleDay(
+            $address,
+            $request->date,
+            $request->shift
+        );
+        $cycleTime = $this->getCycleTimeForMachine($address);
+        $cavity = $this->getCavityForMachine($address);
+
         $rows = ProductionOeeSnapshotFiveMinute::query()
             ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
             ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
@@ -2878,11 +2913,22 @@ class AnalyticsController extends Controller
             $snap = $row->snapshot_at instanceof Carbon
                 ? $row->snapshot_at->copy()->setTimezone($appTimezone)
                 : Carbon::parse((string) $row->snapshot_at, $appTimezone);
+            $ideal = $this->resolveIdealQuantityForFiveMinutePoint(
+                $row,
+                $snap,
+                $request->shift,
+                $appTimezone,
+                $startApp,
+                $otSettingsForDay,
+                $cycleTime,
+                $cavity
+            );
             $data[] = [
                 'snapshot_at' => $snap->format('Y-m-d H:i'),
                 'label' => $snap->format('d/m H:i'),
                 'quantity' => max(0, (int) ($row->total_product ?? 0)),
                 'ideal_quantity' => max(0, (int) ($row->ideal_quantity ?? 0)),
+                'ideal_quantity' => $ideal,
             ];
         }
 
@@ -2926,6 +2972,14 @@ class AnalyticsController extends Controller
         $startStr = $startApp->format('Y-m-d H:i:s');
         $effectiveEndStr = $effectiveEndApp->format('Y-m-d H:i:s');
 
+        $otSettingsForDay = $this->getOtSettingsForMachineForScheduleDay(
+            $address,
+            $request->date,
+            $request->shift
+        );
+        $cycleTime = $this->getCycleTimeForMachine($address);
+        $cavity = $this->getCavityForMachine($address);
+
         $rows = ProductionOeeSnapshotFiveMinute::query()
             ->whereRaw('LOWER(TRIM(machine_name)) = ?', [$addressLower])
             ->whereBetween('snapshot_at', [$startStr, $effectiveEndStr])
@@ -2933,15 +2987,51 @@ class AnalyticsController extends Controller
             ->get();
 
         $data = [];
+        $dateStr = $startApp->format('Y-m-d');
+        [, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $request->shift, $appTimezone);
+        $endRegulerApp = $endRegulerUtc->copy()->setTimezone($appTimezone);
+        $otEnabled = (bool) ($otSettingsForDay['enabled'] ?? false);
+
         foreach ($rows as $row) {
             $snap = $row->snapshot_at instanceof Carbon
                 ? $row->snapshot_at->copy()->setTimezone($appTimezone)
                 : Carbon::parse((string) $row->snapshot_at, $appTimezone);
+
+            $oee = $this->resolveOeePercentForFiveMinutePoint(
+                $row,
+                $snap,
+                $request->shift,
+                $appTimezone,
+                $startApp,
+                $otSettingsForDay,
+                $cycleTime,
+                $cavity
+            );
+
+            $isOtBand = $otEnabled && $snap->greaterThan($endRegulerApp);
+            $product = max(0, (int) ($row->total_product ?? 0));
+            $ideal = $this->resolveIdealQuantityForFiveMinutePoint(
+                $row,
+                $snap,
+                $request->shift,
+                $appTimezone,
+                $startApp,
+                $otSettingsForDay,
+                $cycleTime,
+                $cavity
+            );
+
+            $perf = ($isOtBand && $ideal > 0)
+                ? round(($product / $ideal) * 100, 2)
+                : ($row->performance_percent !== null ? round((float) $row->performance_percent, 2) : null);
+
             $data[] = [
                 'snapshot_at' => $snap->format('Y-m-d H:i'),
                 'oee_percent' => $row->oee_percent !== null ? round((float) $row->oee_percent, 2) : null,
+                'oee_percent' => $oee,
                 'availability_percent' => $row->availability_percent !== null ? round((float) $row->availability_percent, 2) : null,
                 'performance_percent' => $row->performance_percent !== null ? round((float) $row->performance_percent, 2) : null,
+                'performance_percent' => $perf,
                 'quality_percent' => $row->quality_percent !== null ? round((float) $row->quality_percent, 2) : 100.0,
             ];
         }
