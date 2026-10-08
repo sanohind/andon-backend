@@ -17,6 +17,7 @@ use App\Models\MachineSchedule;
 use App\Models\OeeSetting;
 use App\Support\RunningHourOtExtension;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class AnalyticsController extends Controller
 {
@@ -54,9 +55,9 @@ class AnalyticsController extends Controller
         $endDate = Carbon::parse($request->end_date, $appTimezone)->endOfDay()->utc();
 
         // ===================================================================
-        // LOGIKA QUERY TERPADU YANG BARU
+        // LOGIKA QUERY SQL AGGREGATION BERPERFORMA TINGGI
+        // Memindahkan agregasi ke database untuk mencegah Out-Of-Memory di PHP
         // ===================================================================
-        // Ambil semua log yang relevan: yang DIMULAI atau DISELESAIKAN dalam rentang waktu.
         $query = Log::where(function ($query) use ($startDate, $endDate) {
             $query->whereBetween('timestamp', [$startDate, $endDate])
                   ->orWhereBetween('resolved_at', [$startDate, $endDate]);
@@ -77,19 +78,69 @@ class AnalyticsController extends Controller
         if ($request->filled('line_name')) {
             $query->where('line_name', $request->line_name);
         }
-        
-        $allRelevantLogs = $query->get();
-        
-        // Dari semua log yang relevan, filter hanya yang sudah selesai.
-        $resolvedLogs = $allRelevantLogs->where('status', 'OFF')->whereNotNull('resolved_at');
-        // ===================================================================
 
-        // Kalkulasi semua metrik dari data yang sudah benar
-        $kpis = $this->calculateKPIs($allRelevantLogs, $resolvedLogs);
-        $problemFrequency = $this->calculateProblemFrequency($allRelevantLogs);
-        $downtime = $this->calculateDowntime($resolvedLogs);
-        $problemTypes = $this->calculateProblemTypeDistribution($allRelevantLogs);
-        $mttr = $this->calculateMTTR($resolvedLogs);
+        // Subquery untuk log yang sudah selesai
+        $resolvedBase = (clone $query)
+            ->where('status', 'OFF')
+            ->whereNotNull('resolved_at');
+
+        // 1. Frekuensi Problem per Mesin (SQL Group By)
+        $freqRows = (clone $query)
+            ->select('tipe_mesin', DB::raw('COUNT(*) as total'))
+            ->groupBy('tipe_mesin')
+            ->get();
+
+        $problemFrequency = [
+            'labels' => $freqRows->map(fn($r) => $this->resolveMachineName($r->tipe_mesin))->values()->toArray(),
+            'data' => $freqRows->map(fn($r) => (int)$r->total)->values()->toArray(),
+        ];
+
+        $mostProblematicMachine = $freqRows->sortByDesc('total')->first()?->tipe_mesin;
+
+        // 2. Distribusi Tipe Problem (SQL Group By)
+        $typeRows = (clone $query)
+            ->select('tipe_problem', DB::raw('COUNT(*) as total'))
+            ->groupBy('tipe_problem')
+            ->get();
+
+        $problemTypes = [
+            'labels' => $typeRows->pluck('tipe_problem')->values()->toArray(),
+            'data' => $typeRows->map(fn($r) => (int)$r->total)->values()->toArray(),
+        ];
+
+        // 3. Statistik Agregasi Resolved (Total Downtime & Avg Resolution)
+        $resolvedStats = (clone $resolvedBase)
+            ->selectRaw('COALESCE(SUM(duration_in_seconds), 0) as total_downtime, COALESCE(AVG(duration_in_seconds), 0) as avg_resolution')
+            ->first();
+
+        $kpis = [
+            'total_problems' => (clone $query)->count(),
+            'total_downtime_seconds' => (int) ($resolvedStats->total_downtime ?? 0),
+            'most_problematic_machine' => $mostProblematicMachine ? $this->resolveMachineName($mostProblematicMachine) : 'N/A',
+            'average_resolution_time_seconds' => (int) round((float) ($resolvedStats->avg_resolution ?? 0)),
+        ];
+
+        // 4. Downtime per Mesin (SQL Group By)
+        $downtimeRows = (clone $resolvedBase)
+            ->select('tipe_mesin', DB::raw('COALESCE(SUM(duration_in_seconds), 0) as total_duration'))
+            ->groupBy('tipe_mesin')
+            ->get();
+
+        $downtime = [
+            'labels' => $downtimeRows->map(fn($r) => $this->resolveMachineName($r->tipe_mesin))->values()->toArray(),
+            'data' => $downtimeRows->map(fn($r) => (int)$r->total_duration)->values()->toArray(),
+        ];
+
+        // 5. MTTR per Tipe Problem (SQL Group By)
+        $mttrRows = (clone $resolvedBase)
+            ->select('tipe_problem', DB::raw('AVG(duration_in_seconds) as avg_duration'))
+            ->groupBy('tipe_problem')
+            ->get();
+
+        $mttr = [
+            'labels' => $mttrRows->pluck('tipe_problem')->values()->toArray(),
+            'data' => $mttrRows->map(fn($r) => (int) round((float)$r->avg_duration))->values()->toArray(),
+        ];
 
         return response()->json([
             'success' => true,
@@ -1813,40 +1864,59 @@ class AnalyticsController extends Controller
         int $cavity
     ): int {
         $storedIdeal = max(0, (int) ($row->ideal_quantity ?? 0));
-        $otEnabled = (bool) ($otSettingsForDay['enabled'] ?? false);
-        if (!$otEnabled || $cycleTime <= 0) {
+        $otEnabled   = (bool) ($otSettingsForDay['enabled'] ?? false);
+
+        // Hitung batas akhir shift reguler (tanpa OT) — dipakai di kedua cabang.
+        $dateStr      = $shiftStartApp->format('Y-m-d');
+        [, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
+        $endRegulerApp = $endRegulerUtc->copy()->setTimezone($appTimezone);
+
+        // Snapshot masih dalam jam reguler → nilai tersimpan selalu valid, kembalikan apa adanya.
+        if ($displayAt->lte($endRegulerApp)) {
             return $storedIdeal;
         }
 
-        $hour = (int) $displayAt->format('G');
-        if ($this->classifyQuantityHourlyIntervalBand($shift, $hour) !== 'ot') {
-            $dateStr = $shiftStartApp->format('Y-m-d');
-            [, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
-            $endRegulerApp = $endRegulerUtc->copy()->setTimezone($appTimezone);
-            if ($displayAt->lte($endRegulerApp)) {
-                return $storedIdeal;
-            }
+        // Snapshot berada di zona jam OT (setelah akhir reguler).
+        if ($otEnabled && $cycleTime > 0) {
+            // OT aktif → hitung ulang dinamis sehingga garis naik mulus meski OT baru saja diaktifkan.
+            $otDur = $this->resolveOtDurationTypeForRunningHour(
+                $shift,
+                $otSettingsForDay['duration_type'] ?? null
+            );
+
+            return $this->computeCumulativeIdealQuantityForSnapshot(
+                $displayAt,
+                $shiftStartApp,
+                $shift,
+                $appTimezone,
+                $cycleTime,
+                $cavity,
+                true,
+                $otDur
+            );
         }
 
-        $otDur = $this->resolveOtDurationTypeForRunningHour(
-            $shift,
-            $otSettingsForDay['duration_type'] ?? null
-        );
+        // OT tidak aktif (atau dihapus/dinonaktifkan) → cap Ideal Qty pada nilai akhir shift reguler.
+        // Ini menghindari nilai beku tinggi yang tersimpan di snapshot saat OT sebelumnya aktif.
+        if ($cycleTime > 0) {
+            return $this->computeCumulativeIdealQuantityForSnapshot(
+                $endRegulerApp,
+                $shiftStartApp,
+                $shift,
+                $appTimezone,
+                $cycleTime,
+                $cavity,
+                false,   // OT = false agar tidak memasukkan detik lembur
+                null
+            );
+        }
 
-        return $this->computeCumulativeIdealQuantityForSnapshot(
-            $displayAt,
-            $shiftStartApp,
-            $shift,
-            $appTimezone,
-            $cycleTime,
-            $cavity,
-            true,
-            $otDur
-        );
+        return $storedIdeal;
     }
 
     /**
-     * OEE (%) dari titik snapshot dengan penyesuaian ideal OT saat jadwal OT diinput belakangan.
+     * OEE (%) dari titik snapshot dengan penyesuaian ideal OT saat jadwal OT diinput belakangan,
+     * atau dikembalikan ke nilai reguler saat OT dihapus/dinonaktifkan.
      */
     private function resolveOeePercentForFiveMinutePoint(
         ProductionOeeSnapshotFiveMinute $row,
@@ -1874,18 +1944,19 @@ class AnalyticsController extends Controller
             return null;
         }
 
-        $otEnabled = (bool) ($otSettingsForDay['enabled'] ?? false);
-        $hour = (int) $displayAt->format('G');
-        $isOtBand = $otEnabled && $this->classifyQuantityHourlyIntervalBand($shift, $hour) === 'ot';
+        // Tentukan apakah snapshot berada di zona jam OT menggunakan perbandingan presisi
+        // terhadap batas akhir reguler (konsisten dengan resolveIdealQuantityForFiveMinutePoint).
         $dateStr = $shiftStartApp->format('Y-m-d');
         [, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
         $endRegulerApp = $endRegulerUtc->copy()->setTimezone($appTimezone);
-        $isOtBand = $otEnabled && $displayAt->greaterThan($endRegulerApp);
+        $isPostRegular = $displayAt->greaterThan($endRegulerApp);
 
-        if (!$isOtBand && $row->oee_percent !== null) {
+        // Snapshot masih dalam jam reguler dan nilai OEE tersimpan valid → pakai langsung.
+        if (!$isPostRegular && $row->oee_percent !== null) {
             return round((float) $row->oee_percent, 2);
         }
 
+        // Zona OT atau OEE tersimpan tidak tersedia → hitung dari Ideal yang sudah dikoreksi.
         return round(($product / $ideal) * 100, 2);
     }
 
