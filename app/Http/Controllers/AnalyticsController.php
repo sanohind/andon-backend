@@ -2190,12 +2190,19 @@ class AnalyticsController extends Controller
             $otSettingsForDay['duration_type'] ?? null
         );
 
-        $oee = null;
-        if ($otEnabled && $cycleTime > 0) {
-            [, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
-            $endRegulerApp = $endRegulerUtc->copy()->setTimezone($appTimezone);
+        // Hitung regular-end unconditionally — dipakai untuk deteksi zona post-regular
+        // baik ketika OT aktif maupun nonaktif.
+        [, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
+        $endRegulerApp = $endRegulerUtc->copy()->setTimezone($appTimezone);
 
-            if ($effectiveEndApp->greaterThan($endRegulerApp)) {
+        $lastSnapAt = Carbon::parse($lastSnap->snapshot_at)->setTimezone($appTimezone);
+        $isPostRegular = $lastSnapAt->greaterThan($endRegulerApp);
+
+        $oee = null;
+
+        if ($isPostRegular && $cycleTime > 0) {
+            if ($otEnabled) {
+                // Zona OT aktif: hitung ideal = regular portion + OT run time portion
                 $regularSnap = $this->findLastFiveMinuteSnapshotAtOrBefore(
                     $addressLower,
                     $startStr,
@@ -2229,10 +2236,28 @@ class AnalyticsController extends Controller
                 if ($idealTotal > 0) {
                     $oee = round(($product / $idealTotal) * 100, 2);
                 }
+            } else {
+                // OT nonaktif tapi snapshot terakhir ada di zona post-regular:
+                // Cap ideal pada snapshot reguler terakhir (≤ endRegulerApp) agar
+                // OEE kembali ke basis regular, tidak terjebak di nilai elevated DB.
+                $regularSnap = $this->findLastFiveMinuteSnapshotAtOrBefore(
+                    $addressLower,
+                    $startStr,
+                    $endRegulerApp,
+                    $appTimezone
+                );
+                $idealCapped = $regularSnap
+                    ? max(0, (int) ($regularSnap->ideal_quantity ?? 0))
+                    : 0;
+
+                if ($idealCapped > 0) {
+                    $oee = round(($product / $idealCapped) * 100, 2);
+                }
             }
         }
 
         if ($oee === null) {
+            // Zona regular atau fallback: nilai stored dari DB masih valid.
             $oee = $lastSnap->oee_percent !== null ? round((float) $lastSnap->oee_percent, 2) : null;
             if ($oee === null && $storedIdeal > 0) {
                 $oee = round(($product / $storedIdeal) * 100, 2);
