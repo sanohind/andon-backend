@@ -1154,13 +1154,16 @@ class DashboardController extends Controller
             $workStartM = $base->copy()->setTime($wsH, $wsM, 0, 0);
             $workEndM = $base->copy()->setTime($weH, $weM, 0, 0);
             
-            if ($weH < $wsH || ($weH === $wsH && $weM < $wsM)) {
+            $crossesMidnight = $weH < $wsH || ($weH === $wsH && $weM < $wsM);
+            if ($crossesMidnight) {
                 $workEndM->addDay();
             }
             
             if ($otSec > 0) {
                 $workEndM->addSeconds($otSec);
             }
+            
+            $maxSeconds = max(0, $workStartM->diffInSeconds($workEndM));
             
             $effectiveStart = $shiftStart->greaterThan($workStartM) ? $shiftStart->copy() : $workStartM;
             $effectiveEnd = $now->lessThan($workEndM) ? $now->copy() : $workEndM;
@@ -1186,7 +1189,7 @@ class DashboardController extends Controller
                 $breakStartM = $base->copy()->setTime($bsH, $bsM, 0, 0);
                 $breakEndM = $base->copy()->setTime($beH, $beM, 0, 0);
                 
-                if ($isMalam && $bsH < 12) {
+                if ($isMalam && $crossesMidnight && $bsH < 12) {
                     $breakStartM->addDay();
                     $breakEndM->addDay();
                 } elseif ($beH < $bsH || ($beH === $bsH && $beM < $bsM)) {

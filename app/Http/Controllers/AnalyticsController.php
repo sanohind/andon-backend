@@ -1617,11 +1617,19 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Klasifikasi interval (jam awal selang = snapshot sebelumnya) untuk split Reguler vs OT,
-     * selaras dengan frontend analytics.js.
+     * Klasifikasi interval (jam awal selang = snapshot sebelumnya) untuk split Reguler vs OT.
+     * Jika endRegulerApp tersedia, perbandingan dilakukan secara presisi terhadap batas akhir reguler.
      */
-    private function classifyQuantityHourlyIntervalBand(string $shift, int $hour): string
-    {
+    private function classifyQuantityHourlyIntervalBand(
+        string $shift,
+        int $hour,
+        ?Carbon $pointApp = null,
+        ?Carbon $endRegulerApp = null
+    ): string {
+        if ($pointApp !== null && $endRegulerApp !== null) {
+            return $pointApp->greaterThan($endRegulerApp) ? 'ot' : 'regular';
+        }
+
         if ($shift === 'pagi') {
             if ($hour <= 15) {
                 return 'regular';
@@ -1660,6 +1668,10 @@ class AnalyticsController extends Controller
         $otEnabled = $otSettingsForDay['enabled'];
         $otDur = $otSettingsForDay['duration_type'] ?? null;
 
+        $dateStr = $shiftStartApp->format('Y-m-d');
+        [, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
+        $endRegulerApp = $endRegulerUtc->copy()->setTimezone($appTimezone);
+
         $out = [];
         $prevSnap = $anchorTime->copy();
         $prevQty = max(0, $anchorBoardQty);
@@ -1678,7 +1690,7 @@ class AnalyticsController extends Controller
             $qtyDelta = $boardDelta * $cavity;
 
             $hour = (int) $prevSnap->format('G');
-            $band = $this->classifyQuantityHourlyIntervalBand($shift, $hour);
+            $band = $this->classifyQuantityHourlyIntervalBand($shift, $hour, $prevSnap, $endRegulerApp);
 
             $cumTotal += $qtyDelta;
             if ($otEnabled) {
@@ -1796,7 +1808,8 @@ class AnalyticsController extends Controller
         $rows,
         Carbon $atSnap,
         string $shift,
-        string $appTimezone
+        string $appTimezone,
+        ?Carbon $endRegulerApp = null
     ): array {
         $cumRegular = 0;
         $cumOt = 0;
@@ -1815,7 +1828,7 @@ class AnalyticsController extends Controller
             if ($prevSnap !== null && $prevProduct !== null) {
                 $delta = ($product >= $prevProduct) ? ($product - $prevProduct) : $product;
                 $hour = (int) $prevSnap->format('G');
-                $band = $this->classifyQuantityHourlyIntervalBand($shift, $hour);
+                $band = $this->classifyQuantityHourlyIntervalBand($shift, $hour, $prevSnap, $endRegulerApp);
                 if ($band === 'ot') {
                     $cumOt += $delta;
                 } else {
@@ -1980,6 +1993,10 @@ class AnalyticsController extends Controller
         $out = [];
         $prevHourlySnapshotAt = null;
 
+        $dateStr = $shiftStartApp->format('Y-m-d');
+        [, $endRegulerUtc] = $this->resolveRegulerEndForShift($dateStr, $shift, $appTimezone);
+        $endRegulerApp = $endRegulerUtc->copy()->setTimezone($appTimezone);
+
         foreach ($picked as $item) {
             /** @var ProductionOeeSnapshotFiveMinute $row */
             $row = $item['row'];
@@ -2012,7 +2029,8 @@ class AnalyticsController extends Controller
                     $rows,
                     $item['snap'],
                     $shift,
-                    $appTimezone
+                    $appTimezone,
+                    $endRegulerApp
                 );
                 $entry['quantity_cumulative_regular'] = $cumRegular;
                 $entry['quantity_cumulative_ot'] = $cumOt;
@@ -2532,13 +2550,10 @@ class AnalyticsController extends Controller
             return [];
         }
 
-        if ($shift === 'pagi') {
-            $queryStart = $startDateApp->copy()->setTime(7, 1, 0);
-            $queryEnd = $endDateApp->copy()->setTime(20, 0, 59);
-        } else {
-            $queryStart = $startDateApp->copy()->setTime(20, 1, 0);
-            $queryEnd = $endDateApp->copy()->addDay()->setTime(7, 0, 59);
-        }
+        [$startUtc] = $this->resolveShiftWindow($startDateApp->format('Y-m-d'), $shift, $appTimezone);
+        [, $endUtc] = $this->resolveShiftWindow($endDateApp->format('Y-m-d'), $shift, $appTimezone);
+        $queryStart = $startUtc->copy()->setTimezone($appTimezone);
+        $queryEnd = $endUtc->copy()->setTimezone($appTimezone);
 
         $rows = ProductionData::query()
             ->whereBetween('timestamp', [$queryStart->format('Y-m-d H:i:s'), $queryEnd->format('Y-m-d H:i:s')])
@@ -2555,7 +2570,7 @@ class AnalyticsController extends Controller
             $ts = $row->timestamp instanceof Carbon
                 ? $row->timestamp->copy()->setTimezone($appTimezone)
                 : Carbon::parse($row->timestamp, $appTimezone);
-            $productionDate = $this->resolveProductionDateForShiftTimestamp($ts, $shift);
+            $productionDate = $this->resolveProductionDateForShiftTimestamp($ts, $shift, $appTimezone);
             if ($productionDate === null) {
                 continue;
             }
@@ -2581,44 +2596,31 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Tentukan tanggal produksi (Y-m-d) dari timestamp lokal sesuai shift.
+     * Tentukan tanggal produksi (Y-m-d) dari timestamp lokal sesuai shift secara dinamis.
      */
-    private function resolveProductionDateForShiftTimestamp(Carbon $ts, string $shift): ?string
+    private function resolveProductionDateForShiftTimestamp(Carbon $ts, string $shift, string $appTimezone = 'Asia/Jakarta'): ?string
     {
-        $h = (int) $ts->format('H');
-        $m = (int) $ts->format('i');
-        $s = (int) $ts->format('s');
-        $secOfDay = $h * 3600 + $m * 60 + $s;
-        $graceSeconds = 5;
+        $dateStr = $ts->format('Y-m-d');
+        [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
+        $startApp = $startUtc->copy()->setTimezone($appTimezone);
+        $endApp = $endUtc->copy()->setTimezone($appTimezone);
 
-        // Pagi: mulai setelah reset malam (07:01) s.d. akhir jam 20:00 (termasuk 20:00:xx).
-        $pagiStart = 7 * 3600 + 1 * 60;
-        $pagiEnd = 20 * 3600 + 59;
-        // Malam: mulai setelah reset pagi (20:01) s.d. akhir jam 07:00 hari berikutnya (termasuk 07:00:xx).
-        $malamStart = 20 * 3600 + 1 * 60;
-        $malamEnd = 7 * 3600 + 59;
+        $graceSeconds = 30;
+        if ($ts->gte($startApp) && $ts->lte($endApp->copy()->addSeconds($graceSeconds))) {
+            return $dateStr;
+        }
 
-        if ($shift === 'pagi') {
-            if ($secOfDay >= $pagiStart && $secOfDay <= $pagiEnd) {
-                return $ts->format('Y-m-d');
+        if ($shift === 'malam') {
+            $prevDateStr = $ts->copy()->subDay()->format('Y-m-d');
+            [$prevStartUtc, $prevEndUtc] = $this->resolveShiftWindow($prevDateStr, $shift, $appTimezone);
+            $prevStartApp = $prevStartUtc->copy()->setTimezone($appTimezone);
+            $prevEndApp = $prevEndUtc->copy()->setTimezone($appTimezone);
+
+            if ($ts->gte($prevStartApp) && $ts->lte($prevEndApp->copy()->addSeconds($graceSeconds))) {
+                return $prevDateStr;
             }
-            // Antisipasi keterlambatan write beberapa detik setelah 20:01 sebelum reset counter.
-            if ($secOfDay > $pagiEnd && $secOfDay <= ($pagiEnd + $graceSeconds)) {
-                return $ts->format('Y-m-d');
-            }
-            return null;
         }
 
-        if ($secOfDay >= $malamStart) {
-            return $ts->format('Y-m-d');
-        }
-        if ($secOfDay <= $malamEnd) {
-            return $ts->copy()->subDay()->format('Y-m-d');
-        }
-        // Antisipasi keterlambatan write beberapa detik setelah 07:01 sebelum reset counter.
-        if ($secOfDay > $malamEnd && $secOfDay <= ($malamEnd + $graceSeconds)) {
-            return $ts->copy()->subDay()->format('Y-m-d');
-        }
         return null;
     }
 
@@ -2758,9 +2760,21 @@ class AnalyticsController extends Controller
             );
 
             $shiftDate = Carbon::parse($request->date, $appTimezone);
-            $endSlotApp = $request->shift === 'pagi'
-                ? $shiftDate->copy()->setTime(20, 0, 0)
-                : $shiftDate->copy()->addDay()->setTime(7, 0, 0);
+            $currSched = $this->resolveBreakScheduleForDateAndShift($request->date, $request->shift, $appTimezone);
+            if ($currSched['crosses_midnight']) {
+                $endSlotApp = $shiftDate->copy()->addDay()->setTime($currSched['work_end_h'], 0, 0);
+            } else {
+                $endSlotApp = $shiftDate->copy()->setTime($currSched['work_end_h'], 0, 0);
+            }
+            if (!empty($otSettingsForDay['enabled'])) {
+                $otSec = RunningHourOtExtension::extraSeconds(true, $otSettingsForDay['duration_type'] ?? null, $request->shift);
+                if ($otSec > 0) {
+                    $endSlotApp->addSeconds($otSec);
+                    if ($endSlotApp->gt($endApp)) {
+                        $endSlotApp = $endApp->copy();
+                    }
+                }
+            }
             $data = $this->ensureOeeHourlyEndSlotAfterShiftEnd($data, $endSlotApp, $nowApp, $appTimezone);
 
             $shiftMetrics = $this->resolveFiveMinuteShiftOeeMetrics(
@@ -2892,9 +2906,21 @@ class AnalyticsController extends Controller
         }
 
         $shiftDate = Carbon::parse($request->date, $appTimezone);
-        $endSlotApp = $request->shift === 'pagi'
-            ? $shiftDate->copy()->setTime(20, 0, 0)
-            : $shiftDate->copy()->addDay()->setTime(7, 0, 0);
+        $currSched = $this->resolveBreakScheduleForDateAndShift($request->date, $request->shift, $appTimezone);
+        if ($currSched['crosses_midnight']) {
+            $endSlotApp = $shiftDate->copy()->addDay()->setTime($currSched['work_end_h'], 0, 0);
+        } else {
+            $endSlotApp = $shiftDate->copy()->setTime($currSched['work_end_h'], 0, 0);
+        }
+        if (!empty($otSettingsForDay['enabled'])) {
+            $otSec = RunningHourOtExtension::extraSeconds(true, $otSettingsForDay['duration_type'] ?? null, $request->shift);
+            if ($otSec > 0) {
+                $endSlotApp->addSeconds($otSec);
+                if ($endSlotApp->gt($endApp)) {
+                    $endSlotApp = $endApp->copy();
+                }
+            }
+        }
         $data = $this->ensureOeeHourlyEndSlotAfterShiftEnd($data, $endSlotApp, $nowApp, $appTimezone);
 
         // Ringkasan A/P/Q untuk stacked bar: nilai terakhir non-null dalam window shift
@@ -3351,23 +3377,83 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Menentukan window UTC untuk shift terpilih.
-     * Counter di lapangan di-reset sekitar 07:01 (akhir shift malam) dan 20:01 (akhir shift pagi).
-     * - Pagi: snapshot dari 07:01:00 s.d. 20:00:59 hari D (jam 20:00 masih shift pagi; 20:01+ = shift malam).
-     * - Malam: snapshot dari 20:01:00 hari D s.d. 07:00:59 hari D+1 (jam 07:00 masih shift malam; 07:01+ = shift pagi).
+     * Resolves the break schedule (work_start, work_end, breaks) for a specific date and shift from break_schedules.
+     * Fallbacks to standard shift defaults if not found:
+     * - Pagi: 07:00 - 16:00
+     * - Malam: 20:00 - 05:00
+     *
+     * @return array{
+     *     schedule: ?BreakSchedule,
+     *     day_of_week: int,
+     *     work_start: string,
+     *     work_end: string,
+     *     work_start_h: int,
+     *     work_start_m: int,
+     *     work_end_h: int,
+     *     work_end_m: int,
+     *     crosses_midnight: bool
+     * }
+     */
+    private function resolveBreakScheduleForDateAndShift(string $dateStr, string $shift, string $appTimezone): array
+    {
+        $date = Carbon::parse($dateStr, $appTimezone);
+        $dayOfWeek = $date->isoWeekday(); // 1 (Senin) - 7 (Minggu)
+
+        $schedule = BreakSchedule::where('day_of_week', $dayOfWeek)
+            ->where('shift', $shift)
+            ->first();
+
+        $defaultStart = $shift === 'pagi' ? '07:00' : '20:00';
+        $defaultEnd = $shift === 'pagi' ? '16:00' : '05:00';
+
+        $wsStr = $schedule?->work_start ? substr((string) $schedule->work_start, 0, 5) : $defaultStart;
+        $weStr = $schedule?->work_end ? substr((string) $schedule->work_end, 0, 5) : $defaultEnd;
+
+        $ws = $this->parseTimeStringToHm($wsStr) ?? ($shift === 'pagi' ? [7, 0] : [20, 0]);
+        $we = $this->parseTimeStringToHm($weStr) ?? ($shift === 'pagi' ? [16, 0] : [5, 0]);
+
+        $crossesMidnight = $we[0] < $ws[0] || ($we[0] === $ws[0] && $we[1] < $ws[1]);
+
+        return [
+            'schedule' => $schedule,
+            'day_of_week' => $dayOfWeek,
+            'work_start' => $wsStr,
+            'work_end' => $weStr,
+            'work_start_h' => $ws[0],
+            'work_start_m' => $ws[1],
+            'work_end_h' => $we[0],
+            'work_end_m' => $we[1],
+            'crosses_midnight' => $crossesMidnight,
+        ];
+    }
+
+    /**
+     * Menentukan window UTC untuk shift terpilih secara dinamis berdasarkan break_schedules hari tersebut.
+     * - Awal window: jam work_start + 1 menit (karena reset counter di lapangan ~30s setelah work_start).
+     * - Akhir window:
+     *   * Pagi: saat shift malam hari tersebut dimulai (atau work_end bila tidak ada shift malam).
+     *   * Malam: saat shift pagi hari berikutnya dimulai jika nyebrang hari, atau work_end jika selesai sebelum tengah malam.
      *
      * @return array{0: Carbon, 1: Carbon}
      */
     private function resolveShiftWindow(string $dateStr, string $shift, string $appTimezone): array
     {
         $date = Carbon::parse($dateStr, $appTimezone);
+        $curr = $this->resolveBreakScheduleForDateAndShift($dateStr, $shift, $appTimezone);
+
+        $startApp = $date->copy()->setTime($curr['work_start_h'], $curr['work_start_m'], 0)->addMinute();
 
         if ($shift === 'pagi') {
-            $startApp = $date->copy()->setTime(7, 1, 0);
-            $endApp = $date->copy()->setTime(20, 0, 59);
+            $malam = $this->resolveBreakScheduleForDateAndShift($dateStr, 'malam', $appTimezone);
+            $endApp = $date->copy()->setTime($malam['work_start_h'], $malam['work_start_m'], 59);
         } else {
-            $startApp = $date->copy()->setTime(20, 1, 0);
-            $endApp = $date->copy()->addDay()->setTime(7, 0, 59);
+            if (!$curr['crosses_midnight']) {
+                $endApp = $date->copy()->setTime($curr['work_end_h'], $curr['work_end_m'], 59);
+            } else {
+                $nextDateStr = $date->copy()->addDay()->format('Y-m-d');
+                $nextPagi = $this->resolveBreakScheduleForDateAndShift($nextDateStr, 'pagi', $appTimezone);
+                $endApp = $date->copy()->addDay()->setTime($nextPagi['work_start_h'], $nextPagi['work_start_m'], 59);
+            }
         }
 
         $startUtc = $startApp->copy()->utc();
@@ -3378,7 +3464,7 @@ class AnalyticsController extends Controller
 
     /**
      * Hitung Running Hour (detik) sampai timestamp snapshot tertentu,
-     * mengikuti logika break schedule yang sama dengan dashboard realtime.
+     * mengikuti logika break schedule dinamis sesuai hari & shift terpilih.
      */
     private function computeRunningHourSecondsForSnapshot(
         Carbon $snapshotAtApp,
@@ -3422,13 +3508,16 @@ class AnalyticsController extends Controller
         $workEndM = $base->copy()->setTime($weH, $weM, 0, 0);
 
         // Jika jam akhir < jam awal, berarti nyebrang hari
-        if ($weH < $wsH || ($weH === $wsH && $weM < $wsM)) {
+        $crossesMidnight = $weH < $wsH || ($weH === $wsH && $weM < $wsM);
+        if ($crossesMidnight) {
             $workEndM->addDay();
         }
 
         if ($otSec > 0) {
             $workEndM->addSeconds($otSec);
         }
+
+        $maxSeconds = max(0, $workStartM->diffInSeconds($workEndM));
 
         $effectiveStart = $shiftStartApp->greaterThan($workStartM) ? $shiftStartApp->copy() : $workStartM;
         $effectiveEnd = $snapshotAtApp->lessThan($workEndM) ? $snapshotAtApp->copy() : $workEndM;
@@ -3454,8 +3543,8 @@ class AnalyticsController extends Controller
             $breakStartM = $base->copy()->setTime($bsH, $bsM, 0, 0);
             $breakEndM = $base->copy()->setTime($beH, $beM, 0, 0);
 
-            if ($isMalam && $bsH < 12) {
-                // Untuk shift malam, jam < 12 dianggap hari+1
+            if ($isMalam && $crossesMidnight && $bsH < 12) {
+                // Hanya untuk shift malam yang menyebrang hari, jam < 12 dianggap hari+1
                 $breakStartM->addDay();
                 $breakEndM->addDay();
             } elseif ($beH < $bsH || ($beH === $bsH && $beM < $bsM)) {
@@ -3499,8 +3588,8 @@ class AnalyticsController extends Controller
     }
 
     /**
-     * Akhir periode reguler (sebelum OT): pagi 15:59:59, malam 04:59:59 hari berikutnya.
-     * Untuk hitung actual_quantity_regular vs actual_quantity_ot.
+     * Akhir periode reguler (sebelum OT) secara dinamis sesuai break_schedules hari tersebut.
+     * Untuk hitung actual_quantity_regular vs actual_quantity_ot dan batas cap Ideal Qty.
      *
      * @return array{0: Carbon, 1: Carbon} startUtc, endRegulerUtc
      */
@@ -3508,12 +3597,14 @@ class AnalyticsController extends Controller
     {
         [$startUtc, $endUtc] = $this->resolveShiftWindow($dateStr, $shift, $appTimezone);
         $date = Carbon::parse($dateStr, $appTimezone);
+        $curr = $this->resolveBreakScheduleForDateAndShift($dateStr, $shift, $appTimezone);
 
-        if ($shift === 'pagi') {
-            $endRegulerApp = $date->copy()->setTime(15, 59, 59);
+        if ($curr['crosses_midnight']) {
+            $endRegulerApp = $date->copy()->addDay()->setTime($curr['work_end_h'], $curr['work_end_m'], 0)->subSecond();
         } else {
-            $endRegulerApp = $date->copy()->addDay()->setTime(4, 59, 59);
+            $endRegulerApp = $date->copy()->setTime($curr['work_end_h'], $curr['work_end_m'], 0)->subSecond();
         }
+
         $endRegulerUtc = $endRegulerApp->copy()->utc();
         return [$startUtc, $endRegulerUtc];
     }
