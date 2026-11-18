@@ -292,6 +292,8 @@ class MachineNoteController extends Controller
 
         $date = trim((string) $request->query('date', ''));
         $shift = trim((string) $request->query('shift', ''));
+        $machineName = $request->query('machine_name');
+        $machineName = ($machineName === null) ? null : trim((string) $machineName);
         $lineName = $request->query('line_name');
         $lineName = ($lineName === null) ? null : trim((string) $lineName);
 
@@ -307,6 +309,7 @@ class MachineNoteController extends Controller
 
         $rows = MachineNote::query()
             ->where('shift_key', $shiftInfo['shift_key'])
+            ->when($machineName !== null && $machineName !== '', fn ($q) => $q->where('machine_name', $machineName))
             ->when($lineName !== null && $lineName !== '', fn ($q) => $q->where('line_name', $lineName))
             ->whereNotNull('note')
             ->where('note', '!=', '')
