@@ -77,11 +77,12 @@ Route::prefix('ticketing')->group(function () {
 // Server time for global Run Time / Running Hour sync (no auth required for sync)
 Route::get('server-time', [DashboardController::class, 'serverTime']);
 
-// Machine notes (leader can write; others can read)
+// Machine notes (leader/admin/manager can write; others can read)
 Route::prefix('machine-notes')->group(function () {
     Route::get('/current', [MachineNoteController::class, 'current']);
     Route::put('/current', [MachineNoteController::class, 'upsertCurrent']);
     Route::get('/by-shift', [MachineNoteController::class, 'byShift']);
+    Route::put('/by-shift', [MachineNoteController::class, 'upsertByShift']);
 });
 
 // Dashboard status route - accessible without Sanctum (uses custom auth)

@@ -129,7 +129,7 @@ class MachineNoteController extends Controller
     /**
      * PUT /api/machine-notes/current
      * body: { machine_name, line_name?, note }
-     * - leader only
+     * - leader, admin, manager, management
      */
     public function upsertCurrent(Request $request)
     {
@@ -137,7 +137,7 @@ class MachineNoteController extends Controller
         if (!$user) {
             return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
         }
-        if ($user->role !== 'leader') {
+        if (!in_array($user->role, ['leader', 'admin', 'manager', 'management'], true)) {
             return response()->json(['success' => false, 'message' => 'Forbidden'], 403);
         }
 
@@ -155,20 +155,114 @@ class MachineNoteController extends Controller
 
         $shiftInfo = $this->computeShiftInfo(Carbon::now(self::SHIFT_TZ));
 
-        $record = MachineNote::query()->updateOrCreate(
-            [
+        $existing = MachineNote::query()
+            ->where('machine_name', $machineName)
+            ->where('shift_key', $shiftInfo['shift_key'])
+            ->when($lineName !== null && $lineName !== '', function ($q) use ($lineName) {
+                $q->where('line_name', $lineName);
+            }, function ($q) {
+                $q->whereNull('line_name');
+            })
+            ->first();
+
+        if ($existing) {
+            $existing->note = $noteText;
+            $existing->updated_by = $user->id;
+            $existing->save();
+            $record = $existing;
+        } else {
+            $record = MachineNote::query()->create([
                 'machine_name' => $machineName,
                 'line_name' => ($lineName === '') ? null : $lineName,
                 'shift_key' => $shiftInfo['shift_key'],
-            ],
-            [
                 'shift' => $shiftInfo['shift'],
                 'shift_start_at' => $shiftInfo['shift_start_at'],
                 'note' => $noteText,
-                'updated_by' => $user->id,
                 'created_by' => $user->id,
-            ]
-        );
+                'updated_by' => $user->id,
+            ]);
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'id' => $record->id,
+                'machine_name' => $record->machine_name,
+                'line_name' => $record->line_name,
+                'shift' => $record->shift,
+                'shift_key' => $record->shift_key,
+                'shift_start_at' => optional($record->shift_start_at)->toISOString(),
+                'note' => $record->note ?? '',
+                'updated_at' => optional($record->updated_at)->toISOString(),
+            ],
+        ]);
+    }
+
+    /**
+     * PUT /api/machine-notes/by-shift
+     * body: { machine_name, line_name?, date, shift, note }
+     * - leader, admin, manager, management
+     */
+    public function upsertByShift(Request $request)
+    {
+        $user = $this->authenticate($request);
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
+        }
+        if (!in_array($user->role, ['leader', 'admin', 'manager', 'management'], true)) {
+            return response()->json(['success' => false, 'message' => 'Forbidden'], 403);
+        }
+
+        $machineName = trim((string) $request->input('machine_name', ''));
+        $lineName = $request->input('line_name');
+        $lineName = ($lineName === null) ? null : trim((string) $lineName);
+        $date = trim((string) $request->input('date', ''));
+        $shift = trim((string) $request->input('shift', ''));
+        $note = $request->input('note');
+
+        if ($machineName === '') {
+            return response()->json(['success' => false, 'message' => 'machine_name is required'], 422);
+        }
+        if ($date === '' || $shift === '') {
+            return response()->json(['success' => false, 'message' => 'date and shift are required'], 422);
+        }
+
+        try {
+            $shiftInfo = $this->computeShiftInfoFromDateShift($date, $shift);
+        } catch (\Throwable $e) {
+            return response()->json(['success' => false, 'message' => 'Invalid date or shift format'], 422);
+        }
+
+        // note can be empty string to allow clearing
+        $noteText = ($note === null) ? '' : (string) $note;
+
+        $existing = MachineNote::query()
+            ->where('machine_name', $machineName)
+            ->where('shift_key', $shiftInfo['shift_key'])
+            ->when($lineName !== null && $lineName !== '', function ($q) use ($lineName) {
+                $q->where('line_name', $lineName);
+            }, function ($q) {
+                $q->whereNull('line_name');
+            })
+            ->first();
+
+        if ($existing) {
+            $existing->note = $noteText;
+            $existing->updated_by = $user->id;
+            $existing->save();
+            $record = $existing;
+        } else {
+            $record = MachineNote::query()->create([
+                'machine_name' => $machineName,
+                'line_name' => ($lineName === '') ? null : $lineName,
+                'shift_key' => $shiftInfo['shift_key'],
+                'shift' => $shiftInfo['shift'],
+                'shift_start_at' => $shiftInfo['shift_start_at'],
+                'note' => $noteText,
+                'created_by' => $user->id,
+                'updated_by' => $user->id,
+            ]);
+        }
 
         return response()->json([
             'success' => true,
